@@ -1,0 +1,6 @@
+# 我自己的 Gemini 配置：注释应原样保留
+HTTP_PROXY=http://127.0.0.1:7890
+
+export GEMINI_API_KEY="old-key-123"
+GEMINI_MODEL=gemini-2.5-pro
+SOME_OTHER_VAR=hello world

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ferrydeck",
+  "version": "0.3.0",
+  "identifier": "app.ferrydeck.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Ferrydeck",
+        "width": 960,
+        "height": 680,
+        "minWidth": 820,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Ferrydeck：聚合多个中转站，一键配置到 Claude Code / Claude Desktop / Codex / Gemini CLI",
+    "copyright": "Ferrydeck",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDODFDMDIyOThEQkY1NkIKUldScjlkdVlJc0NCM0NpY040QkdWRXppSWhSOVdnckQ2Zlp3akpQbzBTc3RaL3FrL1c5UWt4bHAK",
+      "endpoints": [
+        "https://github.com/taoAIGC/ferrydeck/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

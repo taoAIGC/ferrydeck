@@ -1,0 +1,14 @@
+{
+  "disableDeploymentModeChooser": true,
+  "inferenceGatewayApiKey": "FAKE-OTHER-TOOL-KEY",
+  "inferenceGatewayAuthScheme": "bearer",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:15721",
+  "inferenceModels": [
+    {
+      "labelOverride": "deepseek-v4-flash",
+      "name": "claude-haiku-4-5",
+      "supports1m": true
+    }
+  ],
+  "inferenceProvider": "gateway"
+}

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "fs": {
+      "command": "npx",
+      "args": ["-y", "server"]
+    }
+  },
+  "security": {
+    "auth": {
+      "enforcedType": "oauth-personal"
+    },
+    "folderTrust": true
+  },
+  "ui": {
+    "theme": "深色"
+  }
+}

@@ -1,0 +1,17 @@
+# 构建与依赖
+node_modules/
+dist/
+target/
+gen/
+# 发布产物与发布配置（含你自己的服务器信息）
+release/
+.release.env
+# 签名私钥绝不能提交
+*.key
+*.pem
+# 测试截图、日志、系统文件
+app/ui-tests/shots/
+*.log
+.DS_Store
+.vscode/
+.idea/

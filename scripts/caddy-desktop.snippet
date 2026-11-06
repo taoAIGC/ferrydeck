@@ -1,0 +1,12 @@
+	# Ferrydeck 安装包与更新清单：静态文件，不经过 sub2api。
+	# 必须放在最后那个“兜底 handle { reverse_proxy ... }”之前，否则会被 sub2api 的网页兜底吞掉。
+	redir /desktop /desktop/ 308
+	handle /desktop/* {
+		root * /var/www/your-site   # 改成 DEPLOY_DIR 的上一级目录（里面有 desktop/ 子目录）
+		# 更新清单不缓存，保证新版本发布后马上能被检测到
+		@manifest path /desktop/latest.json
+		header @manifest Cache-Control "no-cache, no-store, must-revalidate"
+		@pkg path /desktop/*.tar.gz /desktop/*.dmg
+		header @pkg Cache-Control "public, max-age=300"
+		file_server
+	}

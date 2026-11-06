@@ -1,0 +1,21 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-FAKE-OLD-TOKEN",
+    "ANTHROPIC_BASE_URL": "https://example.invalid",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Read(~/项目/**)"
+    ],
+    "deny": []
+  },
+  "tui": "fullscreen",
+  "autoMode": {
+    "enabled": true
+  },
+  "model": "opus"
+}
