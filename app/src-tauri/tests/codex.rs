@@ -150,3 +150,81 @@ fn detects_shell_env_conflicts() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].1, "OPENAI_BASE_URL");
 }
+
+// ---------- auth.json：避免 Codex 停在登录页 ----------
+
+fn auth(dir: &Path) -> Option<serde_json::Value> {
+    fs::read_to_string(dir.join("auth.json")).ok().map(|t| serde_json::from_str(&t).unwrap())
+}
+
+#[test]
+fn without_any_login_an_api_key_auth_is_written_and_restore_removes_it() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    assert_eq!(auth(&cd).unwrap()["OPENAI_API_KEY"], "sk-NEW");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(cd.join("auth.json")).unwrap().permissions().mode() & 0o777, 0o600, "含 Key 的文件只给自己读");
+    }
+    codex::apply(&cd, &dd, &params("sk-OTHER", "m")).unwrap(); // 切换分组：跟着换成新 Key
+    assert_eq!(auth(&cd).unwrap()["OPENAI_API_KEY"], "sk-OTHER");
+    codex::restore(&cd, &dd).unwrap();
+    assert!(!cd.join("auth.json").exists(), "原来没有 auth.json，还原后也不应留下");
+    assert_eq!(read(&cd), FIXTURE);
+}
+
+#[test]
+fn a_chatgpt_login_is_never_touched() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    let original = r#"{"OPENAI_API_KEY": null, "tokens": {"id_token": "x", "access_token": "y", "refresh_token": "z"}, "last_refresh": "2026-01-01T00:00:00Z"}"#;
+    fs::write(cd.join("auth.json"), original).unwrap();
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    codex::restore(&cd, &dd).unwrap();
+    assert_eq!(fs::read_to_string(cd.join("auth.json")).unwrap(), original);
+}
+
+#[test]
+fn a_users_own_api_key_is_never_touched() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    let original = r#"{"OPENAI_API_KEY": "sk-USER"}"#;
+    fs::write(cd.join("auth.json"), original).unwrap();
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    codex::apply(&cd, &dd, &params("sk-OTHER", "m")).unwrap();
+    codex::restore(&cd, &dd).unwrap();
+    assert_eq!(fs::read_to_string(cd.join("auth.json")).unwrap(), original);
+}
+
+#[test]
+fn a_logged_out_auth_file_is_filled_and_restored_exactly() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    // 退出 ChatGPT 登录后留下的样子：没有 tokens，还带着 chatgpt 模式标记
+    let original = "{\n  \"OPENAI_API_KEY\": null,\n  \"auth_mode\": \"chatgpt\",\n  \"tokens\": null\n}\n";
+    fs::write(cd.join("auth.json"), original).unwrap();
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    let a = auth(&cd).unwrap();
+    assert_eq!(a["OPENAI_API_KEY"], "sk-NEW");
+    assert!(a.get("auth_mode").is_none(), "残留的 chatgpt 模式会让 Codex 继续要求登录");
+    codex::restore(&cd, &dd).unwrap();
+    assert_eq!(fs::read_to_string(cd.join("auth.json")).unwrap(), original);
+}
+
+#[test]
+fn logging_in_to_chatgpt_meanwhile_survives_restore() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    let mine = r#"{"tokens": {"access_token": "y"}}"#;
+    fs::write(cd.join("auth.json"), mine).unwrap(); // 用户之后在 Codex 里用 ChatGPT 登录了
+    codex::apply(&cd, &dd, &params("sk-OTHER", "m")).unwrap();
+    codex::restore(&cd, &dd).unwrap();
+    assert_eq!(fs::read_to_string(cd.join("auth.json")).unwrap(), mine);
+}
+
+#[test]
+fn an_unreadable_auth_file_is_left_alone() {
+    let (_t, cd, dd) = setup(Some(FIXTURE));
+    fs::write(cd.join("auth.json"), "not json").unwrap();
+    codex::apply(&cd, &dd, &params("sk-NEW", "m")).unwrap();
+    codex::restore(&cd, &dd).unwrap();
+    assert_eq!(fs::read_to_string(cd.join("auth.json")).unwrap(), "not json");
+}

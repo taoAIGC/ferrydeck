@@ -66,6 +66,16 @@ pub enum SiteClient {
     NewApi(newapi::Client),
 }
 
+/// 一次测速的结果：首字延迟与总耗时（毫秒），以及是否真的收到了内容。
+#[derive(Debug, Clone, Serialize)]
+pub struct Probe {
+    pub first_ms: u64,
+    pub total_ms: u64,
+    pub chars: usize,
+    /// 站点报告的输入 token 数（“hi” 这样的空请求的基线）；站点没报告就是 None。
+    pub input_tokens: Option<u64>,
+}
+
 impl SiteClient {
     pub fn new(kind: Kind, base_url: &str, sink: SecretSink) -> Self {
         match kind {
@@ -104,6 +114,14 @@ impl SiteClient {
         }
     }
 
+    /// 距上次成功刷新超过 `max_age` 秒就主动刷新一次登录凭据（续期）。没登录时什么都不做。
+    pub async fn keep_alive(&self, max_age: i64) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.keep_alive(max_age).await,
+            SiteClient::NewApi(c) => c.keep_alive(max_age).await,
+        }
+    }
+
     pub async fn logout(&self) {
         match self {
             SiteClient::Sub2api(c) => c.logout().await,
@@ -125,6 +143,16 @@ impl SiteClient {
         }
     }
 
+
+
+    /// 近 7 天这个分组的成本统计（实付、token、缓存、真实首字时延、预估价格）。
+    pub async fn group_usage(&self, group: &GroupInfo) -> Result<crate::usage::GroupUsage, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.group_usage(group).await,
+            SiteClient::NewApi(c) => c.group_usage(group).await,
+        }
+    }
+
     /// 找到该分组的桌面专用 Key，没有就创建。返回 (明文 Key, 是否新建)。
     pub async fn ensure_key(&self, group: &GroupInfo) -> Result<(String, bool), String> {
         match self {
@@ -138,6 +166,20 @@ impl SiteClient {
             SiteClient::Sub2api(c) => c.models(key).await,
             SiteClient::NewApi(c) => c.models(key).await,
         }
+    }
+
+    /// 批量查找各分组已经建好的本应用 Key（只读，不会新建）。返回 (分组下标, Key 明文)。
+    /// 每个站点只列一次 Key，避免分组多时对站点发出一连串请求。
+    pub async fn existing_keys(&self, groups: &[GroupInfo]) -> Result<Vec<(usize, String)>, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.existing_keys(groups).await,
+            SiteClient::NewApi(c) => c.existing_keys(groups).await,
+        }
+    }
+
+    /// 测速：用该分组的 Key 发一个最小的流式请求，返回首字延迟与总耗时（毫秒）。
+    pub async fn probe(&self, key: &str, model: &str, wire: http::ProbeWire) -> Result<Probe, String> {
+        http::Http::new(self.base()).probe(key, model, wire).await
     }
 
     /// 删除指定名称的 Key（端到端测试清理用）。
@@ -163,8 +205,24 @@ impl SiteClient {
     }
 }
 
+/// 在站点上为分组创建的 Key 名称：`APP名称-分组名称`。
 pub fn key_name(group: &GroupInfo) -> String {
+    format!("Ferrydeck-{}", group.name)
+}
+
+/// 旧版本创建的 Key 名称（`desktop-分组名`）。仍然识别并复用，避免升级后为同一分组再建一把。
+pub fn legacy_key_name(group: &GroupInfo) -> String {
     format!("desktop-{}", group.name)
+}
+
+/// 这个名称是否是本应用为该分组创建的 Key（新旧两种命名都算）。
+pub fn is_our_key_name(name: &str, group: &GroupInfo) -> bool {
+    name == key_name(group) || name == legacy_key_name(group)
+}
+
+/// 这个错误是否表示“登录凭据已失效，必须重新登录”（而不是网络之类的暂时性问题）。
+pub fn is_expired(e: &str) -> bool {
+    e.contains("登录已过期") || e == "未登录"
 }
 
 // ---------- 地址与站点识别 ----------
@@ -206,7 +264,7 @@ pub fn default_name(base_url: &str) -> String {
 }
 
 fn probe_client(base_url: &str) -> reqwest::Client {
-    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent(concat!("Ferrydeck/", env!("CARGO_PKG_VERSION")));
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(http::same_origin_redirects()).user_agent(concat!("Ferrydeck/", env!("CARGO_PKG_VERSION")));
     if http::is_loopback(base_url) {
         b = b.no_proxy(); // 本机地址不走系统代理
     }
@@ -278,6 +336,29 @@ pub fn load_sites(data_dir: &Path) -> Vec<Site> {
 
 pub fn save_sites(data_dir: &Path, sites: &[Site]) -> Result<(), String> {
     save_state(data_dir, SITES_FILE, &SiteFile { sites: sites.to_vec() }).map_err(|e| e.to_string())
+}
+
+// ---------- 数据被清理软件误删时的提示与恢复 ----------
+
+const KNOWN_SITES_FILE: &str = "known-sites.json";
+
+/// 记下“已知站点”（名称、类型、地址，不含任何凭据）到数据目录之外的隐藏目录。
+pub fn save_known_sites(marker_dir: &Path, sites: &[Site]) -> Result<(), String> {
+    save_state(marker_dir, KNOWN_SITES_FILE, &SiteFile { sites: sites.to_vec() }).map_err(|e| e.to_string())
+}
+
+pub fn load_known_sites(marker_dir: &Path) -> Vec<Site> {
+    load_state::<SiteFile>(marker_dir, KNOWN_SITES_FILE).map(|f| f.sites).unwrap_or_default()
+}
+
+/// 数据是否被外力清掉了：数据目录里一个站点都没有，但备忘里记着以前添加过站点。
+/// 用户自己把站点全部移除时备忘也会同步清空，所以不会误报。返回以前的站点列表。
+pub fn detect_data_loss(data_dir: &Path, marker_dir: &Path) -> Option<Vec<Site>> {
+    if !load_sites(data_dir).is_empty() {
+        return None;
+    }
+    let known = load_known_sites(marker_dir);
+    (!known.is_empty()).then_some(known)
 }
 
 /// 平台推断：根据模型名判断分组主要提供哪个厂商的模型（new-api 的分组没有平台字段）。

@@ -1,0 +1,26 @@
+/* 菜单栏面板：紧凑、跟随系统深浅色 */
+.panel-body { margin: 0; background: transparent; overflow: hidden; }
+.fd-panel { display: flex; flex-direction: column; height: 100vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.fd-panel > p { padding: 16px; }
+.panel-tabs { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); }
+.panel-tab { flex: 1 1 0; min-width: 0; padding: 5px 4px; font-size: 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-tab.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.panel-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.panel-row { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; border: 1px solid transparent; border-radius: 8px; }
+.panel-row.is-hover { background: var(--bg); }
+
+.panel-row-main { display: flex; flex-direction: column; min-width: 0; }
+.panel-row-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-row-side { display: flex; align-items: center; gap: 6px; flex: none; }
+.panel-foot { display: flex; justify-content: space-between; gap: 6px; padding: 6px; border-top: 1px solid var(--line); }
+.panel-foot button { flex: 1; white-space: nowrap; }
+.panel-toast { padding: 6px 12px; font-size: 12px; background: var(--info-bg); border-top: 1px solid var(--line); }
+.panel-working { display: inline-flex; align-items: center; }
+.panel-working .octo-work { margin-right: 4px; }
+.panel-refresh { display: flex; align-items: center; gap: 2px; flex: none; }
+.panel-refresh button.icon-btn { padding: 3px 5px; }
+.panel-refresh button { flex: none; }
+
+/* 面板里的“启用”图标平时隐藏，鼠标移到这一行（或键盘聚焦）才显示；“使用中”和“配置中”一直显示 */
+.panel-power { display: inline-flex; opacity: 0; transition: opacity 0.12s ease; }
+.panel-row.is-hover .panel-power, .panel-row:focus-visible .panel-power { opacity: 1; }

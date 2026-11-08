@@ -12,9 +12,9 @@ fn keys(v: &Value) -> Vec<String> {
 
 #[test]
 fn group_view_matches_frontend_type() {
-    let g = GroupView { site_id: "s".into(), site_name: "S".into(), id: "1".into(), name: "n".into(), description: None, platform: "anthropic".into(), rate_multiplier: 0.5, clients: vec![Client::Claude, Client::ClaudeDesktop] };
+    let g = GroupView { site_id: "s".into(), site_name: "S".into(), id: "1".into(), name: "n".into(), description: None, platform: "anthropic".into(), rate_multiplier: 0.5, clients: vec![Client::Claude, Client::ClaudeDesktop], models: vec![], clients_inferred: false };
     let v = serde_json::to_value(&g).unwrap();
-    assert_eq!(keys(&v), ["clients", "description", "id", "name", "platform", "rate_multiplier", "site_id", "site_name"]);
+    assert_eq!(keys(&v), ["clients", "clients_inferred", "description", "id", "models", "name", "platform", "rate_multiplier", "site_id", "site_name"]);
     assert_eq!(v["clients"], json!(["claude", "claude_desktop"]));
     assert_eq!(v["description"], Value::Null);
     let none = serde_json::to_value(GroupView { clients: vec![], ..g }).unwrap();
@@ -28,9 +28,9 @@ fn enable_outcome_and_overview_match_frontend_types() {
     assert_eq!(keys(&v), ["client", "conflicts", "key_created", "model", "models"]);
     assert_eq!(v["client"], "codex");
 
-    let ov = ClientOverview { client: Client::Gemini, dir_exists: true, in_use: true, active: Some(Active { site_id: "s".into(), site_name: "S".into(), group_id: "3".into(), group_name: "g".into(), model: None }), conflicts: vec![] };
+    let ov = ClientOverview { client: Client::Gemini, dir_exists: true, in_use: true, active: Some(Active { site_id: "s".into(), site_name: "S".into(), group_id: "3".into(), group_name: "g".into(), model: None }), conflicts: vec![], groups_inferred: false };
     let v = serde_json::to_value(&ov).unwrap();
-    assert_eq!(keys(&v), ["active", "client", "conflicts", "dir_exists", "in_use"]);
+    assert_eq!(keys(&v), ["active", "client", "conflicts", "dir_exists", "groups_inferred", "in_use"]);
     assert_eq!(keys(&v["active"]), ["group_id", "group_name", "model", "site_id", "site_name"]);
     assert_eq!(v["client"], "gemini");
 }

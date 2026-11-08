@@ -1,9 +1,9 @@
 //! new-api 适配器的离线测试：用本地模拟服务器重现各种真实站点的行为。
 use std::sync::{Arc, Mutex};
 
-use app_lib::sites::{GroupInfo, Kind, SiteClient};
+use app_lib::sites::{is_expired, GroupInfo, Kind, SiteClient};
 use serde_json::{json, Value};
-use wiremock::matchers::{body_json, header, method, path, path_regex};
+use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type Saved = Arc<Mutex<Vec<String>>>;
@@ -205,8 +205,8 @@ async fn create_request_carries_the_group_and_unlimited_quota() {
     mount_status(&s, status_ok()).await;
     mount_login(&s, "t", far(), "c").await;
     Mock::given(method("GET")).and(path("/api/token/")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"items": []}}))).up_to_n_times(1).mount(&s).await;
-    Mock::given(method("POST")).and(path("/api/token/")).and(body_json(json!({"name": "desktop-A B", "group": "A B", "remain_quota": 0, "unlimited_quota": true, "expired_time": -1, "model_limits_enabled": false, "model_limits": "", "allow_ips": "", "cross_group_retry": false}))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true}))).expect(1).mount(&s).await;
-    Mock::given(method("GET")).and(path("/api/token/")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"items": [{"id": 3, "name": "desktop-A B", "group": "A B", "status": 1}]}}))).mount(&s).await;
+    Mock::given(method("POST")).and(path("/api/token/")).and(body_json(json!({"name": "Ferrydeck-A B", "group": "A B", "remain_quota": 0, "unlimited_quota": true, "expired_time": -1, "model_limits_enabled": false, "model_limits": "", "allow_ips": "", "cross_group_retry": false}))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true}))).expect(1).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/token/")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"items": [{"id": 3, "name": "Ferrydeck-A B", "group": "A B", "status": 1}]}}))).mount(&s).await;
     Mock::given(method("POST")).and(path_regex(r"^/api/token/3/key$")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"key": "k"}}))).mount(&s).await;
     let (c, _) = client(&s);
     c.login("u", "p").await.unwrap();
@@ -284,4 +284,147 @@ async fn a_non_newapi_address_gets_an_actionable_message() {
     let (c, _) = client(&s);
     let e = c.login("u", "p").await.unwrap_err();
     assert!(e.contains("意外的内容") && e.contains("确认站点地址"), "{e}");
+}
+
+// ---------- 登录保持 ----------
+
+fn refreshed(access: &str, cookie: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(login_ok(access, far())).insert_header("set-cookie", format!("new_api_refresh={cookie}; Path=/; HttpOnly").as_str())
+}
+
+/// new-api 的刷新 Cookie 每次都轮换：c1 只认第一次，之后再用就被拒绝。
+async fn mount_rotating_refresh(s: &MockServer) {
+    Mock::given(method("POST")).and(path("/api/user/auth/refresh")).and(header("cookie", "new_api_refresh=c1")).respond_with(refreshed("good", "c2").set_delay(std::time::Duration::from_millis(200))).up_to_n_times(1).expect(1).mount(s).await;
+    Mock::given(method("POST")).and(path("/api/user/auth/refresh")).respond_with(ResponseTemplate::new(401)).with_priority(10).mount(s).await;
+}
+
+#[tokio::test]
+async fn concurrent_calls_with_an_expiring_token_rotate_the_cookie_only_once() {
+    let s = MockServer::start().await;
+    mount_status(&s, status_ok()).await;
+    mount_login(&s, "stale", 1, "c1").await; // 登录时就快过期，两个请求都会先去刷新
+    mount_rotating_refresh(&s).await;
+    Mock::given(method("GET")).and(path("/api/user/self")).and(header("authorization", "Bearer good")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"username": "u", "quota": 0}}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/user/self/groups")).and(header("authorization", "Bearer good")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {}}))).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/pricing")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": []}))).mount(&s).await;
+    let (c, saved) = client(&s);
+    c.login("u", "p").await.unwrap();
+    let (me, groups) = tokio::join!(c.me(), c.groups());
+    assert!(me.is_ok() && groups.is_ok(), "{me:?} {groups:?}");
+    assert_eq!(*saved.lock().unwrap(), ["c2"]);
+}
+
+#[tokio::test]
+async fn concurrent_resumes_at_startup_rotate_the_cookie_only_once() {
+    let s = MockServer::start().await;
+    mount_rotating_refresh(&s).await;
+    let (c, saved) = client(&s);
+    let (a, b) = tokio::join!(c.resume("c1"), c.resume("c1"));
+    assert!(a.is_ok() && b.is_ok(), "{a:?} {b:?}");
+    assert_eq!(*saved.lock().unwrap(), ["c2"]);
+}
+
+#[tokio::test]
+async fn site_troubles_keep_the_login_and_it_recovers_without_relogin() {
+    for bad in [ResponseTemplate::new(502), ResponseTemplate::new(403).set_body_string("<html>Just a moment...</html>"), ResponseTemplate::new(200).set_body_string("<html>portal</html>")] {
+        let s = MockServer::start().await;
+        mount_status(&s, status_ok()).await;
+        Mock::given(method("POST")).and(path("/api/user/auth/refresh")).respond_with(bad).up_to_n_times(1).mount(&s).await;
+        Mock::given(method("POST")).and(path("/api/user/auth/refresh")).and(header("cookie", "new_api_refresh=c1")).respond_with(refreshed("good", "c2")).with_priority(10).mount(&s).await;
+        Mock::given(method("GET")).and(path("/api/user/self")).and(header("authorization", "Bearer good")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"username": "u", "quota": 500000}}))).mount(&s).await;
+        let (c, saved) = client(&s);
+        let e = c.resume("c1").await.unwrap_err();
+        assert!(e.contains("稍后会自动重试") && !is_expired(&e), "{e}");
+        assert!(c.is_logged_in().await, "暂时性问题不能丢掉凭据");
+        assert_eq!(c.me().await.unwrap().balance, "$1.00");
+        assert_eq!(*saved.lock().unwrap(), ["c2"]);
+    }
+}
+
+#[tokio::test]
+async fn keep_alive_rotates_the_cookie_when_the_last_refresh_is_old_enough() {
+    let s = MockServer::start().await;
+    mount_status(&s, status_ok()).await;
+    mount_login(&s, "t", far(), "c1").await;
+    Mock::given(method("POST")).and(path("/api/user/auth/refresh")).and(header("cookie", "new_api_refresh=c1")).respond_with(refreshed("good", "c2")).expect(1).mount(&s).await;
+    let (c, saved) = client(&s);
+    c.login("u", "p").await.unwrap();
+    c.keep_alive(3600).await.unwrap();
+    assert!(saved.lock().unwrap().is_empty());
+    c.keep_alive(0).await.unwrap();
+    assert_eq!(*saved.lock().unwrap(), ["c2"]);
+}
+
+#[tokio::test]
+async fn existing_keys_lists_once_and_only_fetches_plaintext_for_groups_that_have_a_key() {
+    let s = MockServer::start().await;
+    mount_status(&s, status_ok()).await;
+    mount_login(&s, "t", far(), "c1").await;
+    Mock::given(method("GET")).and(path("/api/token/")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"items": [
+        {"id": 9, "name": "Ferrydeck-Kiro", "group": "Kiro", "status": 1},
+        {"id": 8, "name": "desktop-Old", "group": "Old", "status": 1},
+        {"id": 7, "name": "Ferrydeck-Off", "group": "Off", "status": 2},
+    ]}}))).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/api/token/9/key")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"key": "kiro-secret"}}))).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/api/token/8/key")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"key": "old-secret"}}))).expect(1).mount(&s).await;
+    Mock::given(method("POST")).and(path("/api/token/")).respond_with(ResponseTemplate::new(500)).expect(0).mount(&s).await; // 绝不新建
+    let (c, _) = client(&s);
+    c.login("u", "p").await.unwrap();
+    let groups = [group("Kiro"), group("Old"), group("Off"), group("None")];
+    let found = c.existing_keys(&groups).await.unwrap();
+    assert_eq!(found, vec![(0, "sk-kiro-secret".to_string()), (1, "sk-old-secret".to_string())]);
+}
+
+#[tokio::test]
+async fn group_usage_sums_the_consumption_log_with_cache_and_first_token_from_other() {
+    let s = MockServer::start().await;
+    mount_status(&s, status_ok()).await;
+    mount_login(&s, "t", far(), "c").await;
+    // other 既可能是 JSON 字符串，也可能是对象
+    Mock::given(method("GET")).and(path("/api/log/self")).and(query_param("group", "Kiro")).and(query_param("type", "2")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"total": 4, "items": [
+        {"model_name": "claude-sonnet-5", "prompt_tokens": 1000, "completion_tokens": 500, "quota": 500000, "use_time": 3, "other": "{\"frt\": 400, \"cache_tokens\": 800, \"cache_creation_tokens\": 100}"},
+        {"model_name": "claude-sonnet-5", "prompt_tokens": 1000, "completion_tokens": 500, "quota": 500000, "use_time": 1, "other": {"frt": 800, "cache_tokens": 0}},
+        {"model_name": "gpt", "prompt_tokens": 1000, "completion_tokens": 0, "quota": 0, "other": "{\"usage_semantic\":\"openai\",\"cache_tokens\":600}"},
+        {"model_name": "haiku", "prompt_tokens": 0, "completion_tokens": 0, "quota": 0, "use_time": 0, "other": "not json"},
+    ]}}))).expect(1).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/pricing")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+        {"model_name": "claude-sonnet-5", "enable_groups": ["Kiro"], "quota_type": 0, "model_ratio": 1.5, "completion_ratio": 5.0},
+        {"model_name": "claude-other", "enable_groups": ["Else"], "quota_type": 0, "model_ratio": 1.0}]}))).mount(&s).await;
+    let (c, _) = client(&s);
+    c.login("u", "p").await.unwrap();
+    let mut g = group("Kiro");
+    g.rate_multiplier = 0.5;
+    let u = c.group_usage(&g).await.unwrap();
+    assert_eq!((u.currency.as_str(), u.requests, u.total_requests, u.sampled), ("$", 4, 4, false));
+    assert_eq!((u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_creation_tokens), (2400, 1000, 1400, 100));
+    assert!((u.cost - 2.0).abs() < 1e-9, "两条各 1 美元: {}", u.cost);
+    assert_eq!(u.cost_per_m_effective.map(|v| v.round()), Some(588.0));
+    assert_eq!((u.first_token_median_ms, u.first_token_samples), (Some(400), 2));
+    assert_eq!(u.models.len(), 3);
+    assert_eq!(u.estimates.len(), 1, "只算这个分组里的按量计费模型");
+    let e = &u.estimates[0];
+    assert!((e.input_per_m - 1.5).abs() < 1e-9 && (e.output_per_m - 7.5).abs() < 1e-9, "{e:?}");
+}
+
+#[tokio::test]
+async fn group_usage_reports_when_the_log_is_only_a_sample_and_fails_if_the_log_fails() {
+    let s = MockServer::start().await;
+    mount_status(&s, status_ok()).await;
+    mount_login(&s, "t", far(), "c").await;
+    let items: Vec<Value> = (0..100).map(|_| json!({"model_name": "m", "prompt_tokens": 10, "completion_tokens": 10, "quota": 500})).collect();
+    Mock::given(method("GET")).and(path("/api/log/self")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"total": 1000, "items": items}}))).expect(3).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/pricing")).respond_with(ResponseTemplate::new(500)).mount(&s).await;
+    let (c, _) = client(&s);
+    c.login("u", "p").await.unwrap();
+    let u = c.group_usage(&group("Kiro")).await.unwrap();
+    assert_eq!((u.requests, u.total_requests, u.sampled), (300, 1000, true), "最多翻 3 页");
+    assert!(u.notes.iter().any(|n| n.contains("1000")), "{:?}", u.notes);
+
+    let s2 = MockServer::start().await;
+    mount_status(&s2, status_ok()).await;
+    mount_login(&s2, "t", far(), "c").await;
+    Mock::given(method("GET")).and(path("/api/log/self")).respond_with(ResponseTemplate::new(500)).mount(&s2).await;
+    let (c2, _) = client(&s2);
+    c2.login("u", "p").await.unwrap();
+    assert!(c2.group_usage(&group("Kiro")).await.is_err());
 }

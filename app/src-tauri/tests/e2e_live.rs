@@ -63,13 +63,13 @@ async fn run_site(kind: Kind, base: &str, user: &str, pw: &str) {
 
     let (acc, _) = client.login(user, pw).await.expect("登录失败");
     println!("[{}] 登录成功: {} 余额 {}", kind.label(), acc.display, acc.balance);
-    let pre: Vec<String> = client.all_key_names().await.unwrap().into_iter().filter(|n| n.starts_with("desktop-")).collect();
+    let pre: Vec<String> = client.all_key_names().await.unwrap().into_iter().filter(|n| n.starts_with("Ferrydeck-")).collect();
 
     // 无论成败都清理本次创建的 desktop-* Key
     let (c2, p2, s2) = (client.clone(), paths.clone(), site.clone());
     let result = tokio::spawn(async move { flow(&c2, &s2, &p2).await }).await;
     let mut deleted = 0;
-    for n in client.all_key_names().await.unwrap().into_iter().filter(|n| n.starts_with("desktop-") && !pre.contains(n)) {
+    for n in client.all_key_names().await.unwrap().into_iter().filter(|n| n.starts_with("Ferrydeck-") && !pre.contains(n)) {
         deleted += client.delete_key_named(&n).await.unwrap();
     }
     println!("[{}] 清理：删除了 {deleted} 个本次创建的 Key", kind.label());
@@ -135,11 +135,11 @@ async fn flow(client: &SiteClient, site: &Site, paths: &Paths) {
     assert!(supported > 0, "没有任何分组能配置");
     let names = client.all_key_names().await.unwrap();
     let mut seen = std::collections::BTreeMap::new();
-    for n in names.iter().filter(|n| n.starts_with("desktop-")) {
+    for n in names.iter().filter(|n| n.starts_with("Ferrydeck-")) {
         *seen.entry(n.clone()).or_insert(0) += 1;
     }
     assert!(seen.values().all(|n| *n == 1), "同名桌面 Key 不应重复: {seen:?}");
-    assert!(!seen.contains_key("desktop-default"));
+    assert!(!seen.contains_key("Ferrydeck-default"));
 
     // 用写进配置里的真实 Key 各打一个最小请求，证明“写进去的配置真的能用”
     let http = reqwest::Client::new();

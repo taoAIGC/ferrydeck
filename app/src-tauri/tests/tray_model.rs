@@ -6,7 +6,7 @@ fn g(id: i64, name: &str, clients: Vec<Client>) -> GroupView {
 }
 
 fn gs(site: &str, site_name: &str, id: i64, name: &str, clients: Vec<Client>) -> GroupView {
-    GroupView { site_id: site.into(), site_name: site_name.into(), id: id.to_string(), name: name.into(), description: None, platform: "x".into(), rate_multiplier: 0.5, clients }
+    GroupView { site_id: site.into(), site_name: site_name.into(), id: id.to_string(), name: name.into(), description: None, platform: "x".into(), rate_multiplier: 0.5, clients, models: vec![], clients_inferred: false }
 }
 
 fn ov(client: Client, active: Option<(i64, &str)>) -> ClientOverview {
@@ -16,6 +16,7 @@ fn ov(client: Client, active: Option<(i64, &str)>) -> ClientOverview {
         in_use: active.is_some(),
         active: active.map(|(id, n)| Active { site_id: "s1".into(), site_name: "站点一".into(), group_id: id.to_string(), group_name: n.into(), model: None }),
         conflicts: vec![],
+        groups_inferred: false,
     }
 }
 

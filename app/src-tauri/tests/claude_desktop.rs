@@ -181,7 +181,7 @@ fn conflicts_explain_missing_third_party_mode() {
 
     fs::create_dir_all(&c3p).unwrap();
     fs::write(c3p.join("claude_desktop_config.json"), r#"{"deploymentMode":"1p"}"#).unwrap();
-    assert!(cd::detect_conflicts(&c3p)[0].contains("尚未切换到第三方推理模式"));
+    assert!(cd::detect_conflicts(&c3p)[0].contains("还没有切换到第三方推理模式"));
 
     fs::write(c3p.join("claude_desktop_config.json"), r#"{"deploymentMode":"3p"}"#).unwrap();
     assert!(cd::detect_conflicts(&c3p).is_empty());

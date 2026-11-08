@@ -8,6 +8,12 @@ import type { AccountInfo, Backend, ClientId, ClientOverview, DetectedSite, Enab
  *   enable-fail  启用总是失败      empty  站点没有任何分组      conflict  Claude Code 存在配置冲突
  *   nodir        本机没有客户端配置目录   desktop-off  Claude Desktop 尚未切换到第三方模式
  *   expire-on-enable  启用时发现站点登录已过期
+ *   ratelimit    Alpha 测速时返回 429（站点限流）
+ *   plaza        站点开了“模型广场”：sub2api 的分组一加载就带着模型（不用测速）
+ *   keyfail      Alpha 创建 Key 后读不回来（对应 pqh.ai 的情况）
+ *   probefail    Alpha 的分组 2/4/12 测速分别因余额不足/无可用账号/模型无渠道而失败
+ *   dataloss     启动时没有站点，但记录里以前有 Alpha 和 Beta（数据目录被清理软件删了）
+ *   offline      Beta 暂时连不上（网络问题，凭据还在）；点“重试”后恢复
  *   update / update-fail / check-fail   更新相关
  * 模拟站点地址：alpha.example.com(sub2api) beta.example.com(new-api) gamma.example.com(new-api)；
  *   captcha.example.com 需要人机验证；其他地址识别失败。密码 ok123 正确。
@@ -17,7 +23,7 @@ const has = (s: string) => scenarios.has(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const delay = () => sleep(has("slow") ? 1200 : 80);
 
-type MockGroup = Omit<GroupView, "site_id" | "site_name">;
+type MockGroup = Omit<GroupView, "site_id" | "site_name" | "models" | "clients_inferred"> & { models?: string[]; clients_inferred?: boolean };
 function g(id: string, name: string, platform: string, rate: number, description: string | null): MockGroup {
   const clients = ({ anthropic: ["claude", "claude_desktop"], openai: ["codex"], gemini: ["gemini"] } as Record<string, ClientId[]>)[platform] ?? [];
   return { id, name, description, platform, rate_multiplier: rate, clients };
@@ -65,6 +71,12 @@ export function createMockBackend(): Backend {
   if (has("sites1") || has("sites2")) urls.push("https://alpha.example.com");
   if (has("sites2")) urls.push("https://beta.example.com");
   urls.forEach((u) => connected.set(u, !(has("expired") && u.includes("beta"))));
+  // 网络等暂时性问题：凭据还在，重试后能恢复
+  const offline = new Set(has("offline") ? urls.filter((u) => u.includes("beta")) : []);
+  // 数据丢失场景：启动时没有站点，但“记录”里有 Alpha 和 Beta
+  let lossPending = has("dataloss");
+  let lastFetch = 0;
+  let fetchCalls = 0;
   const customNames = new Map<string, string>();
   const active: Partial<Record<ClientId, { site_id: string; site_name: string; group_id: string; group_name: string; model: string | null }>> = {};
   const created = new Set<string>();
@@ -72,7 +84,7 @@ export function createMockBackend(): Backend {
 
   const view = (url: string): SiteView => {
     const d = SITE_DEFS[url];
-    const ok = connected.get(url) ?? false;
+    const ok = (connected.get(url) ?? false) && !offline.has(url);
     return {
       id: siteId(url),
       kind: d.kind,
@@ -80,7 +92,8 @@ export function createMockBackend(): Backend {
       base_url: url,
       connected: ok,
       account: ok ? ({ display: d.kind === "sub2api" ? "demo@example.com" : "demo", balance: d.balance } as AccountInfo) : null,
-      error: ok ? null : "登录已过期，请重新登录",
+      error: ok ? null : offline.has(url) ? "暂时无法连接站点（请求超时，请检查网络），稍后会自动重试" : "登录已过期，请重新登录",
+      needs_login: !ok && !offline.has(url),
     };
   };
   const urlOf = (id: string) => urls.find((u) => siteId(u) === id);
@@ -95,12 +108,12 @@ export function createMockBackend(): Backend {
 
   return {
     async appVersion() {
-      return "0.3.0";
+      return "0.4.0";
     },
     async checkUpdate() {
       await delay();
       if (has("check-fail")) throw new Error("无法获取更新信息，请稍后再试");
-      return has("update") || has("update-fail") ? { version: "0.3.0", notes: "新增多站点支持" } : null;
+      return has("update") || has("update-fail") ? { version: "0.4.0", notes: "新增多站点支持" } : null;
     },
     async installUpdate() {
       await sleep(has("slow") ? 1500 : 300);
@@ -111,6 +124,22 @@ export function createMockBackend(): Backend {
     async loadSites() {
       await delay();
       return urls.map(view);
+    },
+    async dataLoss() {
+      await delay();
+      return lossPending ? { sites: [{ name: "Alpha", base_url: "https://alpha.example.com" }, { name: "Beta", base_url: "https://beta.example.com" }] } : null;
+    },
+    async restoreSites() {
+      await delay();
+      for (const u of ["https://alpha.example.com", "https://beta.example.com"]) {
+        if (!urls.includes(u)) urls.push(u);
+        connected.set(u, false); // 没有凭据：需要重新登录
+      }
+      lossPending = false;
+    },
+    async dismissDataLoss() {
+      await delay();
+      lossPending = false;
     },
     async detectSite(url): Promise<DetectedSite> {
       await delay();
@@ -138,18 +167,63 @@ export function createMockBackend(): Backend {
       urls.splice(urls.indexOf(u), 1);
       for (const c of Object.keys(active) as ClientId[]) if (active[c]?.site_id === id) delete active[c];
     },
+    async groupModelsMap() {
+      await delay();
+      return {} as Record<string, string[]>;
+    },
+    async groupUsage(siteId, groupId) {
+      ((window as unknown as { __usageCalls?: string[] }).__usageCalls ??= []).push(`${siteId}/${groupId}`);
+      await sleep(has("slow") ? 1200 : 300);
+      if (has("usagefail")) throw new Error("站点限流了（429），请 30 秒后再试");
+      const base = { window_days: 7, currency: "$", nominal_multiplier: 1, sampled: false, sample_requests: 0, fetched_at: Math.floor(Date.now() / 1000), models: [], estimates: [], notes: [] as string[] };
+      if (has("nousage") || groupId === "4") {
+        return { ...base, requests: 0, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, effective_tokens: 0, cost: 0, official_cost: null, cost_per_m_effective: null, cache_hit_rate: null, actual_multiplier: null, first_token_median_ms: null, first_token_p90_ms: null, first_token_samples: 0, avg_duration_ms: null, total_requests: 0 };
+      }
+      void siteId;
+      return {
+        ...base, requests: 120, total_requests: 120, input_tokens: 600_000, output_tokens: 400_000, cache_creation_tokens: 100_000, cache_read_tokens: 300_000, effective_tokens: 1_000_000,
+        cost: 2, official_cost: 4, cost_per_m_effective: 2 + (Number(groupId) || 0) / 10, cache_hit_rate: 0.3 + (Number(groupId) || 0) / 100, actual_multiplier: 0.5, first_token_median_ms: has("realfrt") ? 820 : null, first_token_p90_ms: has("realfrt") ? 2100 : null, first_token_samples: has("realfrt") ? 40 : 0, avg_duration_ms: 3200,
+        models: [{ model: "claude-sonnet-5-5", requests: 100, input_tokens: 500_000, output_tokens: 300_000, cache_creation_tokens: 90_000, cache_read_tokens: 250_000, cost: 1.8, cost_per_m_effective: 2.25 }, { model: "claude-haiku-5-5", requests: 20, input_tokens: 100_000, output_tokens: 100_000, cache_creation_tokens: 10_000, cache_read_tokens: 50_000, cost: 0.2, cost_per_m_effective: 1 }],
+        estimates: [{ model: "claude-sonnet-5-5", input_per_m: 1.5, output_per_m: 7.5, cache_read_per_m: 0.15 }],
+      };
+    },
+    async probeGroup(siteId, groupId) {
+      // 测试用：记录实际向“站点”发了几次、发给哪个站点
+      const w = window as unknown as { __probeSites?: string[] };
+      (w.__probeSites ??= []).push(siteId);
+      await sleep(has("slow") ? 1200 : 400);
+      if (has("ratelimit") && siteId === "alpha") throw new Error("站点限流了（429），请 30 秒后再试");
+      if (has("keyfail") && siteId === "alpha") throw new Error("创建 Key 后没有找到它");
+      if (has("probefail") && siteId === "alpha") {
+        // 对应 bestapi.io 后台里真实出现过的几种上游失败
+        if (groupId === "2") throw new Error("Insufficient account balance");
+        if (groupId === "4") throw new Error("No available accounts: no available accounts");
+        if (groupId === "12") throw new Error("分组 CCMAXcode（限制claude code） 下模型 claude-sonnet-5-5 的可用渠道不存在（retry）");
+      }
+      const v = view(urlOf(siteId)!);
+      const ms = 300 + ((groupId.length * 137) % 900);
+      return { first_ms: ms, total_ms: ms + 700, input_tokens: 24, model: "claude-sonnet-5-5", models: v ? ["claude-sonnet-5-5", "claude-sonnet-5"] : [] };
+    },
     async refreshAccounts() {
+      await delay();
+      offline.clear(); // 网络恢复了
       return urls.map(view);
     },
-    async listGroups() {
+    async listGroups(maxAgeSecs = 0) {
       await delay();
+      // 和真实后端一致：maxAge 秒内拉过就用缓存（时间不变）；手动刷新（0）一定重新拉
+      const nowS = Math.floor(Date.now() / 1000);
+      if (!(maxAgeSecs > 0 && lastFetch > 0 && nowS - lastFetch < maxAgeSecs)) {
+        lastFetch = nowS;
+        (window as unknown as { __listGroupsCalls: number }).__listGroupsCalls = ++fetchCalls;
+      }
       const groups: GroupView[] = [];
       for (const u of urls) {
-        if (!connected.get(u)) continue;
+        if (!connected.get(u) || offline.has(u)) continue;
         const v = view(u);
-        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, site_id: v.id, site_name: v.name })));
+        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, models: x.models ?? (has("plaza") ? (SITE_DEFS[u].kind === "sub2api" ? (x.clients.length > 0 ? MODELS[x.clients[0]] : []) : ["beta-only-model", "claude-sonnet-5-5"]) : []), clients_inferred: x.clients_inferred ?? SITE_DEFS[u].kind === "newapi", site_id: v.id, site_name: v.name })));
       }
-      return { groups, sites: urls.map(view) };
+      return { groups, sites: urls.map(view), fetched_at: lastFetch };
     },
     async overview(): Promise<ClientOverview[]> {
       return (["claude", "claude_desktop", "codex", "gemini"] as ClientId[]).map((c) => ({
@@ -157,11 +231,12 @@ export function createMockBackend(): Backend {
         dir_exists: !has("nodir"),
         in_use: !!active[c],
         active: active[c] ?? null,
+        groups_inferred: has("unclassified"),
         conflicts:
           has("conflict") && c === "claude"
             ? ["/Users/me/.zshrc: ANTHROPIC_BASE_URL", "/Users/me/.claude/settings.local.json: env.ANTHROPIC_AUTH_TOKEN"]
             : has("desktop-off") && c === "claude_desktop"
-              ? ["Claude Desktop 尚未切换到第三方推理模式（deploymentMode=未设置），配置写入后不会生效"]
+              ? ["Claude Desktop 还没有切换到第三方推理模式（当前：未设置）：请在 Claude Desktop 里进入 开发者 → 配置第三方推理，然后完全退出（⌘Q）再打开"]
               : [],
       }));
     },

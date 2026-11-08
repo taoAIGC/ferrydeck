@@ -228,9 +228,14 @@ pub fn detect_conflicts(claude_3p: &Path) -> Vec<String> {
         return out;
     }
     let cfg = claude_3p.join("claude_desktop_config.json");
-    let mode = fs::read_to_string(&cfg).ok().and_then(|t| parse_root(&t).ok()).and_then(|m| m.get("deploymentMode").and_then(Value::as_str).map(String::from));
-    if mode.as_deref() != Some("3p") {
-        out.push(format!("Claude Desktop 尚未切换到第三方推理模式（deploymentMode={}），配置写入后不会生效", mode.unwrap_or_else(|| "未设置".into())));
+    // 只有读到了文件、且明确写着别的模式时才提示；文件正被 Claude Desktop 改写（读到半截）时不误报
+    let Some(root) = fs::read_to_string(&cfg).ok().and_then(|t| parse_root(&t).ok()) else { return out };
+    match root.get("deploymentMode").and_then(Value::as_str) {
+        Some("3p") => {}
+        other => out.push(format!(
+            "Claude Desktop 还没有切换到第三方推理模式（当前：{}）：请在 Claude Desktop 里进入 开发者 → 配置第三方推理，然后完全退出（⌘Q）再打开",
+            other.unwrap_or("未设置")
+        )),
     }
     out
 }

@@ -10,17 +10,28 @@
 ## 功能
 
 - 添加多个站点，自动识别 new-api / sub2api，用站点的账号密码登录；所有站点的分组合并显示，同名分组并存、可按站点筛选
-- 点“启用”：自动为该分组创建（或复用）一把名为 `desktop-<分组名>` 的专用 Key，并写进对应客户端的配置
+- 点“启用”：自动为该分组创建（或复用）一把名为 `Ferrydeck-<分组名>` 的专用 Key（旧版建的 `desktop-<分组名>` 会继续复用），并写进对应客户端的配置
 - 每个站点独立显示余额，有“去充值”入口；某个站点登录过期只影响它自己
-- 关闭窗口后常驻菜单栏，点图标可直接切换分组
+- 关闭窗口后常驻菜单栏，点图标弹出面板，可直接切换分组；选完不会自动收起，方便连续操作，点别处才关闭
+- 点站点名称在浏览器里打开站点；「去充值」「移除」是图标按钮
+- 顶栏有 GitHub 主页入口，应用名右侧有刷新按钮和“最近一次拉取分组的时间”；点按钮手动刷新，自动刷新（切回窗口、打开菜单栏面板）在一分钟内拉过时不会再请求站点；排序规则会记住上次的选择
+- 「测速」对当前列出的分组**逐个**测试（间隔约 1 秒，随时可停止）：每个分组只发一条 “hi”、只测一个模型一次，收到第一个字就断开，显示首字延迟，并拉取真实可用模型。第一次使用前会说明：没有专用 Key 的分组会在站点上创建一把 `Ferrydeck-<分组名>`
+- 「Token成本」列：分组列表里有一列 **Token成本**，显示该分组最近一次读取到的**每百万有效 Token 的平均成本**（近 7 天实付 ÷ 输入+输出 Token × 100 万；缓存 Token 单独统计，不计入有效 Token）。鼠标放到列标题上有口径说明，点标题可按成本升序 / 降序排序（没读取过、或近 7 天没有用量的分组排在最后）。成本随「刷新」一起读取：点刷新按钮会把所有分组的成本全部重读；打开窗口 / 面板、切回窗口触发的自动刷新只补读 10 分钟内没读过的，不会反复请求站点（应用最小化或只留在菜单栏时不会在后台读取）。读到的结果会记在本机，下次打开直接显示，鼠标放到数字上能看到取数时间
+- 「首字时延」优先显示站点用量记录里的**真实首字时延**（近 7 天请求的中位数，随成本一起读到）；没有真实数据的分组才显示本地测速的结果。测速按钮在窗口标题栏、刷新时间的右边
+- 「模型」列显示该分组的模型数量，点击在右侧抽屉里展开完整的模型列表
+- 「成本详情」抽屉（点列表里的成本数字打开）：近 7 天的实付总额、每百万有效 Token 成本、缓存创建/读取与缓存命中率、实际倍率（实付 ÷ 官方价，仅 sub2api）、真实首字时延（中位数 / P90，来自站点的使用记录）、按模型的明细、预估价格（官方价 × 倍率），以及测速时“hi”空请求的输入 Token 基线。只读站点自己的用量记录，不涉及对话内容，同一分组 10 分钟内不重复请求
+- 按模型筛选分组（模型来自：站点的“模型广场”/定价接口，刷新时就能拿到；或已建好 Key 的分组、测速时的实际查询结果）
+- new-api 的分组没有平台分类，在每种客户端下都会显示，并标注「该站点未对分组分类」；添加这类站点后会弹窗说明对使用体验的影响
 - 写入配置前自动备份；写入后自检，不对就自动回滚；只改自己管的项，其他内容原样保留
 - 应用内自动更新（签名校验）
 
 ## 隐私与安全
 
-- **密码不会被保存**，只在登录那一刻发给你填写的站点；登录后的刷新凭据存在 macOS 钥匙串里
+- **密码不会被保存**，只在登录那一刻发给你填写的站点；登录后的刷新凭据存在应用数据目录的 `sessions.json` 里（权限 0600，只有你自己能读）
 - 应用只连接**你添加的站点**和**更新地址**，没有统计、没有遥测
 - 站点必须是 https（本机地址除外）；开启了人机验证、2FA、或关闭了密码登录的站点暂不支持
+- 测速失败等问题可以看诊断日志 `~/.ferrydeck/logs/ferrydeck.log`（不含任何密钥）
+- 数据目录被清理软件误删时会明确提示，并可一键恢复站点列表：应用另在 `~/.ferrydeck/` 记了站点的名称和地址（没有任何凭据）
 - 为每个分组创建的 Key 会明文写进客户端自己的配置文件（客户端工作所必需），请注意这些文件的访问权限
 
 详见 [SECURITY.md](SECURITY.md)。
@@ -42,7 +53,7 @@ curl -fsSL https://github.com/taoAIGC/ferrydeck/releases/latest/download/install
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` | `env.ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / 可选 `ANTHROPIC_MODEL` |
 | Claude Desktop | `~/Library/Application Support/Claude-3p/configLibrary/` | 一个固定 id 的方案文件，在 `_meta.json` 登记并设为当前 |
-| Codex | `~/.codex/config.toml` | `[model_providers.ferrydeck]`，`model_provider` / `model`（不碰 `auth.json`） |
+| Codex | `~/.codex/config.toml`（+ `auth.json`） | `[model_providers.ferrydeck]`，`model_provider` / `model`；Codex 没有任何登录时才写一份 API Key 模式的 `auth.json`，免得打开就停在登录页（已有的 ChatGPT 登录或你自己的 Key 不动，还原时撤销） |
 | Gemini CLI | `~/.gemini/.env` + `settings.json` | `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` / 可选 `GEMINI_MODEL`，`security.auth.selectedType` |
 
 > Claude Desktop 需要你先在它里面开启开发者模式并进入第三方推理模式，写入的配置才会生效。
@@ -106,10 +117,11 @@ app/
     service.rs            “分组 → Key → 写入客户端配置”
     state.rs              已添加的站点及登录会话
     tray.rs               菜单栏菜单内容
-    session_store.rs      登录凭据存钥匙串
+    session_store.rs      登录凭据保存到应用数据目录（0600 文件）
   src-tauri/tests/        Rust 测试
   ui-tests/               界面自动化测试
-scripts/                  install.sh / release.sh / deploy.sh
+  panel.html + src/panel.ts 菜单栏面板（点菜单栏图标弹出的窗口）
+scripts/                  install.sh / release.sh / deploy.sh / render-icons.mjs（图标源文件在 app/src-tauri/icons/source/）
 docs/                     设计说明、截图
 ```
 

@@ -11,6 +11,12 @@ export default defineConfig(() => ({
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
+  // 主窗口和菜单栏面板是两个页面
+  build: {
+    rollupOptions: {
+      input: { main: "index.html", panel: "panel.html" },
+    },
+  },
   server: {
     port: 1420,
     strictPort: true,

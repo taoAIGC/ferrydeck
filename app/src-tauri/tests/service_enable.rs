@@ -108,21 +108,17 @@ async fn switching_between_two_sites_overwrites_cleanly_and_updates_the_active_r
 }
 
 #[tokio::test]
-async fn unsupported_and_image_only_groups_are_refused_without_touching_any_config() {
-    let s = fake_newapi(&["grok-4.5"]).await;
-    let (c, site) = connect(&s).await;
-    let root = TempDir::new().unwrap();
-    let paths = Paths::under(root.path());
-    let e = service::enable(&c, &site, &paths, &grp("grok", &[]), Client::Claude, None).await.unwrap_err();
-    assert!(e.contains("暂不支持"), "{e}");
-
+async fn image_only_groups_are_refused_without_touching_any_config() {
+    // new-api 的分组没有平台分类，每种客户端下都展示（第 13 项），所以这里只验证“没有对话模型”时拒绝
     let s2 = fake_newapi(&["gpt-image-2", "gpt-image-2.5"]).await;
     let (c2, site2) = connect(&s2).await;
+    let root = TempDir::new().unwrap();
+    let paths = Paths::under(root.path());
     let e2 = service::enable(&c2, &site2, &paths, &grp("openai", &[]), Client::Codex, None).await.unwrap_err();
     assert!(e2.contains("图片"), "{e2}");
 
     let e3 = service::enable(&c2, &site2, &paths, &grp("openai", &[]), Client::Claude, None).await.unwrap_err();
-    assert!(e3.contains("不能配置到"), "{e3}");
+    assert!(e3.contains("图片"), "{e3}");
     assert!(!paths.claude.exists() && !paths.codex.exists(), "被拒绝时不应写任何文件");
 }
 

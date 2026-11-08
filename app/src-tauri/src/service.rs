@@ -72,8 +72,18 @@ pub struct EnableOutcome {
     pub conflicts: Vec<String>,
 }
 
+/// 测速结果，附带该分组实测可用的模型。
+#[derive(Debug, Serialize)]
+pub struct ProbeResult {
+    pub first_ms: u64,
+    pub total_ms: u64,
+    pub input_tokens: Option<u64>,
+    pub model: String,
+    pub models: Vec<String>,
+}
+
 /// 给界面展示用的分组信息。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GroupView {
     pub site_id: String,
     pub site_name: String,
@@ -84,6 +94,10 @@ pub struct GroupView {
     pub rate_multiplier: f64,
     /// 可配置的客户端；为空表示暂不支持一键配置。
     pub clients: Vec<Client>,
+    /// 分组已自带的模型（sub2api 不提供，前端会额外拉取）。
+    pub models: Vec<String>,
+    /// 这个站点的分组没有平台分类，`clients` 是按模型推断出来的。
+    pub clients_inferred: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +108,8 @@ pub struct ClientOverview {
     pub in_use: bool,
     pub active: Option<Active>,
     pub conflicts: Vec<String>,
+    /// 当前使用的是否为“按模型推断”的分组（与分组无关，只是让界面能解释为什么分组会出现在多个客户端下）。
+    pub groups_inferred: bool,
 }
 
 fn active_path(p: &Paths) -> std::path::PathBuf {
@@ -141,14 +157,26 @@ pub async fn enable(client: &SiteClient, site: &Site, paths: &Paths, group: &Gro
     if is_hidden_group(&group.name) {
         return Err("分组不存在或已无权使用".into());
     }
-    if !clients_for(&group.platform).contains(&target) {
+    // new-api 的分组没有平台字段，无法判断该配到哪个客户端，允许配到任意客户端
+    let allowed = if site.kind == crate::sites::Kind::Newapi { vec![Client::Claude, Client::ClaudeDesktop, Client::Codex, Client::Gemini] } else { clients_for(&group.platform) };
+    if !allowed.contains(&target) {
         return Err(if clients_for(&group.platform).is_empty() {
             format!("「{}」暂不支持一键配置（平台：{}）", group.name, group.platform)
         } else {
             format!("「{}」不能配置到 {}", group.name, target.id())
         });
     }
-    let (key, created) = client.ensure_key(group).await?;
+    let who = format!("{} ({}) group={} [{}] client={}", site.name, site.base_url, group.name, group.id, target.id());
+    let (key, created) = match client.ensure_key(group).await {
+        Ok(v) => v,
+        Err(e) => {
+            crate::applog::log("enable_fail", &format!("{who} step=key error={e}"));
+            return Err(e);
+        }
+    };
+    if created {
+        crate::applog::log("key_create", &format!("{who} 已为该分组创建专用 Key"));
+    }
     let mut all = client.models(&key).await;
     if all.is_empty() {
         all = group.models.clone();
@@ -181,6 +209,7 @@ pub async fn enable(client: &SiteClient, site: &Site, paths: &Paths, group: &Gro
     let mut act = load_active(paths);
     act.insert(target, Active { site_id: site.id.clone(), site_name: site.name.clone(), group_id: group.id.clone(), group_name: group.name.clone(), model: chosen.clone() });
     save_active(paths, &act)?;
+    crate::applog::log("enable_ok", &format!("{who} model={}", chosen.as_deref().unwrap_or("-")));
     Ok(EnableOutcome { client: target, key_created: created, models, model: chosen, conflicts: conflicts(paths, target) })
 }
 
@@ -218,7 +247,7 @@ pub fn overview(paths: &Paths) -> Vec<ClientOverview> {
                 Client::Gemini => (&paths.gemini, gemini::status(&paths.gemini, &paths.data).map(|s| s.in_use)),
             };
             let on = on.unwrap_or(false);
-            ClientOverview { client: c, dir_exists: dir.exists(), in_use: on, active: if on { act.get(&c).cloned() } else { None }, conflicts: conflicts(paths, c) }
+            ClientOverview { client: c, dir_exists: dir.exists(), in_use: on, active: if on { act.get(&c).cloned() } else { None }, conflicts: conflicts(paths, c), groups_inferred: false }
         })
         .collect()
 }
