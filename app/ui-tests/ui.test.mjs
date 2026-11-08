@@ -1356,8 +1356,14 @@ test("刷新时一并读取成本：手动刷新全部重读，自动刷新只�
   const p = await open("sites1");
   await T(p, "group-card-alpha-2").waitFor();
   await p.waitForFunction(() => document.querySelector('[data-testid="cost-val-alpha-2"]')?.textContent?.startsWith("$"));
-  await p.waitForTimeout(2500);
-  const first = await p.evaluate(() => window.__usageCalls.length);
+  // 等打开页面时的那一轮读取完成：请求数连续 1.2 秒不再增加（慢机器上这一轮会更久）
+  let first = -1;
+  for (let stable = 0; stable < 4; ) {
+    await p.waitForTimeout(300);
+    const n = await p.evaluate(() => window.__usageCalls.length);
+    stable = n === first ? stable + 1 : 0;
+    first = n;
+  }
   assert.ok(first > 0, "打开页面时读取成本");
   await p.evaluate(() => window.dispatchEvent(new Event("focus")));
   await p.waitForTimeout(800);
