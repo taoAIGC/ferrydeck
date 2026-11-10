@@ -393,7 +393,8 @@ button.rate:hover { filter: brightness(1.15); }
 
 /* 内容区顶部的客户端 tab */
 .client-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
-.client-tabs .side-item { width: auto; flex: none; min-width: 120px; }
+.client-tabs .side-item { width: auto; flex: 1 1 0; min-width: 120px; max-width: 260px; }
+.client-tabs .side-text { overflow: hidden; }
 
 /* 分组行：启用按钮右边的“···”，悬停换成三个图标（sayhi / 修改分组 / 创建下游） */
 .card-action { width: var(--col-action); }
@@ -449,3 +450,6 @@ button.seg.on { background: var(--info-bg); color: var(--text); border-color: va
 /* 24h流水：下游分组 = 收入（绿，+），上游账号 = 成本（红，-） */
 .pill.flow.in { color: var(--ok-fg, #1a8f4c); }
 .pill.flow.out { color: var(--err-fg, #d33); }
+
+/* 读取失败的格子：红色小字，悬停看原因 */
+.muted.fail { color: var(--err-fg, #d33); }

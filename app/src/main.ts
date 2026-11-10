@@ -189,7 +189,7 @@ const MIN_CACHE_REQUESTS = 100;
 const CACHE_NOTE = "如果调用量少于100次，效果不准确，则不展示";
 /** 列表里展示的缓存命中率：调用量不足、或还没读取过的没有值 */
 const cacheShown = (c: CostEntry | undefined): number | null => (c && (c.reqs ?? 0) >= MIN_CACHE_REQUESTS ? (c.cache ?? null) : null);
-type CostEntry = { /** 24 小时流水：c24 = 用户实付，o24 = 官方价口径 */ c24?: number | null; o24?: number | null; perM: number | null; /** 官方价口径的每百万有效 Token 成本（站长视角：乘上游真实倍率才是付给上游的钱） */ offM?: number | null; currency: string; at: number; /** 真实首字时延（中位数，毫秒）和样本数 */ frt?: number | null; frtN?: number; /** 缓存命中率 0~1 */ cache?: number | null; /** 近 7 天的调用次数：太少时缓存命中率不准，列表里不展示 */ reqs?: number; /** 过去 24 小时的 Token 量（站长视角）；capped 表示只统计了一部分 */ t24?: number | null; t24cap?: boolean };
+type CostEntry = { /** 站点给的补充说明（例如某项没有读到的原因） */ note?: string; /** 24 小时流水：c24 = 用户实付，o24 = 官方价口径 */ c24?: number | null; o24?: number | null; perM: number | null; /** 官方价口径的每百万有效 Token 成本（站长视角：乘上游真实倍率才是付给上游的钱） */ offM?: number | null; currency: string; at: number; /** 真实首字时延（中位数，毫秒）和样本数 */ frt?: number | null; frtN?: number; /** 缓存命中率 0~1 */ cache?: number | null; /** 近 7 天的调用次数：太少时缓存命中率不准，列表里不展示 */ reqs?: number; /** 过去 24 小时的 Token 量（站长视角）；capped 表示只统计了一部分 */ t24?: number | null; t24cap?: boolean };
 type BillEntry = { perM: number | null; c24: number | null; c24cap: boolean; t24: number | null; currency: string; at: number; reqs: number; siteName: string; group: string };
 function loadCosts(): Record<string, CostEntry> {
   try {
@@ -199,7 +199,8 @@ function loadCosts(): Record<string, CostEntry> {
   }
 }
 function rememberCost(g: { site_id: string; id: string }, u: GroupUsage) {
-  state.costs[gkey(g)] = { perM: u.cost_per_m_effective, currency: u.currency, at: u.fetched_at, frt: u.first_token_median_ms, frtN: u.first_token_samples, cache: u.cache_hit_rate, reqs: u.total_requests };
+  state.costs[gkey(g)] = { perM: u.cost_per_m_effective, currency: u.currency, at: u.fetched_at, frt: u.first_token_median_ms, frtN: u.first_token_samples, cache: u.cache_hit_rate, reqs: u.total_requests, note: u.notes.join("；") || undefined };
+  delete state.fails[`cost|${gkey(g)}`];
   try {
     localStorage.setItem(COSTS_KEY, JSON.stringify(state.costs));
   } catch {
@@ -260,6 +261,8 @@ const state = {
   /** 上游账号的真实账单：读的是上游站点自己的用量记录（你在那个站点登录账号下，关联的那个分组实际扣的钱），不是估算 */
   adminBill: {} as Record<string, BillEntry | undefined>,
   billPending: new Set<string>(),
+  /** 读取失败的原因（键：cost|分组 / adm|管理端项 / bill|账单 / models）：对应的格子写“读取失败”，悬停看原因 */
+  fails: {} as Record<string, string>,
   /** 每个上游分组底下挂着的下游分组（键：上游站点 + 分组）：在分组列表里显示“下游：站点 · 分组 · 倍率” */
   downstreamRefs: {} as Record<string, DownstreamRef[]>,
   /** 我的中转站列表的排序：默认按过去 24 小时 Token 量从高到低（越重要越靠前） */
@@ -449,8 +452,10 @@ async function loadAllModels() {
     const map = await backend.groupModelsMap();
     state.allModels = { ...state.allModels, ...map };
     render();
-  } catch {
-    /* 拿不到就只用分组自带的信息 */
+    delete state.fails.models;
+  } catch (e) {
+    state.fails.models = errText(e); // 拿不到就只用分组自带的信息；模型列写“读取失败”，悬停看原因
+    render();
   }
 }
 
@@ -918,7 +923,7 @@ function viewClientTabs(): HTMLElement {
           "span",
           { class: "side-text" },
           el("span", { class: "side-name" }, CLIENTS[c].name, o && o.conflicts.length > 0 ? el("span", { class: "warn-mark", title: "存在可能覆盖配置的设置" }, " ⚠") : null),
-          el("span", { class: "side-sub", "data-testid": `client-status-${c}` }, a ? (multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name) : state.loading && state.groups.length === 0 ? "加载中…" : count === 0 ? "暂无可用分组" : ""),
+          el("span", { class: "side-sub", ...(a ? { "data-tip": multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name } : {}), "data-testid": `client-status-${c}` }, a ? (multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name) : state.loading && state.groups.length === 0 ? "加载中…" : count === 0 ? "暂无可用分组" : ""),
         ),
       );
     }),
@@ -1236,7 +1241,9 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
       )
     : modelList.length
       ? el("span", { class: "pill", "data-testid": `row-models-${tid}`, "data-tip": modelTip(modelList), "data-tip-mono": "1" }, `${modelList.length} 个模型`)
-      : el("span", { class: "muted small", "data-testid": `row-models-${tid}`, title: "测速后可看到该分组的模型" }, "—");
+      : state.fails.models
+        ? el("span", { class: "muted small fail", "data-testid": `row-models-${tid}`, "data-tip": `模型列表读取失败：${state.fails.models}。点顶部刷新重试` }, "读取失败")
+        : el("span", { class: "muted small", "data-testid": `row-models-${tid}`, "data-tip": "还没有读到这个分组的模型：站点有“模型广场”时刷新就能读到；没有的话，需要这个分组建过专用 Key（启用或测速一次）后才能读取" }, "未获取");
   return el(
     "div",
     { class: `card${isActive ? " active" : ""}`, "data-testid": `group-card-${tid}` },
@@ -1247,7 +1254,12 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
       g.clients_inferred && el("span", { class: "unclassified", "data-testid": `unclassified-${tid}` }, "该站点未对分组分类"),
       ...((state.downstreamRefs[k] ?? []).length ? [el("div", { class: "downstream-lines", "data-testid": `downs-${tid}` }, ...state.downstreamRefs[k].map((r) => el("span", { class: "down-chip", "data-tip": `下游分组：${r.site_name} 里的「${r.group_name}」，倍率 ×${r.rate}`, "data-testid": `down-ref-${tid}-${r.group_id}` }, "↳ ", el("span", { class: "chip-site" }, r.site_name), " · ", r.group_name, " ", el("span", { class: "chip-rate" }, `×${r.rate}`))))] : []),
     ),
-    el("div", { class: "cell-speed" }, state.probing.has(k) ? octopusSpinner(tid) : speedText ? el("span", { class: `pill speed${realFrt === null && "error" in sp! ? " bad" : ""}`, "data-tip": realFrt !== null ? `真实首字时延（近 7 天 ${real!.frtN} 个请求的中位数，来自站点的使用记录）` : "error" in sp! ? `测速失败：${sp!.error}` : `本地测速的首字延迟（模型 ${sp!.model}）${sp!.input != null ? `；发一句“hi”站点计 ${sp!.input} 个输入 Token` : ""}`, "data-testid": `speed-${tid}` }, speedText) : el("span", { class: "muted small" }, "—")),
+    el("div", { class: "cell-speed" }, state.probing.has(k) ? octopusSpinner(tid) : speedText ? el("span", { class: `pill speed${realFrt === null && "error" in sp! ? " bad" : ""}`, "data-tip": realFrt !== null ? `真实首字时延（近 7 天 ${real!.frtN} 个请求的中位数，来自站点的使用记录）` : "error" in sp! ? `测速失败：${sp!.error}` : `本地测速的首字延迟（模型 ${sp!.model}）${sp!.input != null ? `；发一句“hi”站点计 ${sp!.input} 个输入 Token` : ""}`, "data-testid": `speed-${tid}` }, speedText) : (() => {
+      const f = state.fails[`cost|${k}`];
+      if (f) return el("span", { class: "muted small fail", "data-tip": `真实首字时延读取失败：${f}` }, "读取失败");
+      if (real) return el("span", { class: "muted small", "data-tip": `${real.note ? real.note + "；" : ""}近 7 天没有带首字时间的流式请求（只有流式请求才会记录首字时延）。可以点右侧「···」里的 sayhi 测试或顶部的测速，自己测一次` }, "无记录");
+      return el("span", { class: "muted small", "data-tip": "还没有首字时延：点顶部的刷新会读取近 7 天的真实记录，或点测速自己测一次" }, "未读取");
+    })()),
     el("div", { class: "cell-rate" }, el("span", { class: "rate", title: "计费倍率" }, `×${g.rate_multiplier}`)),
     el("div", { class: "cell-cost" }, costCell(g, tid)),
     el("div", { class: "cell-cache" }, cacheCell(g, tid)),
@@ -1260,7 +1272,9 @@ function costCell(g: GroupView, tid: string): HTMLElement {
   const c = state.costs[gkey(g)];
   if (!c) {
     const reading = state.costLoading?.pending.has(gkey(g));
-    return el("span", { class: `muted small ${reading ? "reading" : "empty"}`, "data-tip": reading ? "正在读取…" : "还没读取到成本：点顶部的刷新按钮会一并读取", "data-testid": `cost-val-${tid}` }, reading ? "读取中…" : "—");
+    const f = state.fails[`cost|${gkey(g)}`];
+    if (!reading && f) return el("span", { class: "muted small fail", "data-tip": `成本读取失败：${f}。点顶部刷新重试`, "data-testid": `cost-val-${tid}` }, "读取失败");
+    return el("span", { class: `muted small ${reading ? "reading" : "empty"}`, "data-tip": reading ? "正在读取…" : "还没读取到成本：点顶部的刷新按钮会一并读取", "data-testid": `cost-val-${tid}` }, reading ? "读取中…" : "未读取");
   }
   const when = `取数于 ${fullTime(c.at)}`;
   if (c.perM === null) return el("span", { class: "muted small", "data-tip": `近 7 天没有用量；${when}`, "data-testid": `cost-val-${tid}` }, "无用量");
@@ -1281,7 +1295,9 @@ function cacheCell(g: GroupView, tid: string): HTMLElement {
     const reading = !c && state.costLoading?.pending.has(gkey(g));
     // 读到了但调用量不够 100 次：明确说“无有效统计”，不给一个不准的数
     if (c && c.reqs !== undefined && c.reqs < MIN_CACHE_REQUESTS) return el("span", { class: "muted small empty", "data-tip": `${base}；近 7 天只有 ${c.reqs} 次调用。${CACHE_NOTE}`, "data-testid": `cache-val-${tid}` }, "无有效统计");
-    return el("span", { class: `muted small ${reading ? "reading" : "empty"}`, "data-tip": reading ? "正在读取…" : c ? "近 7 天没有可统计的输入" : "还没读取到：点顶部的刷新按钮会一并读取", "data-testid": `cache-val-${tid}` }, reading ? "读取中…" : "—");
+    const f = state.fails[`cost|${gkey(g)}`];
+    if (!c && !reading && f) return el("span", { class: "muted small fail", "data-tip": `缓存命中率读取失败：${f}。点顶部刷新重试`, "data-testid": `cache-val-${tid}` }, "读取失败");
+    return el("span", { class: `muted small ${reading ? "reading" : "empty"}`, "data-tip": reading ? "正在读取…" : c ? "近 7 天没有可统计的输入，算不出命中率" : "还没读取到：点顶部的刷新按钮会一并读取", "data-testid": `cache-val-${tid}` }, reading ? "读取中…" : c ? "无输入" : "未读取");
   }
   return el("span", { class: "pill cache-rate", "data-tip": `${base}；取数于 ${fullTime(c!.at)}；${CACHE_NOTE}`, "data-testid": `cache-val-${tid}` }, pct(r));
 }
@@ -1316,11 +1332,13 @@ async function readCosts(scope: "listed" | "all", force: boolean, quiet: boolean
   const worker = async () => {
     while (next < list.length) {
       const g = list[next++];
+      if (limited.has(g.site_id)) state.fails[`cost|${gkey(g)}`] = "这个站点刚刚限流了，剩下的分组先不读，请稍后点顶部刷新重试";
       if (!limited.has(g.site_id)) {
         try {
           rememberCost(g, await backend.groupUsage(g.site_id, g.id, force));
         } catch (e) {
           failed = e instanceof Error ? e.message : String(e);
+          state.fails[`cost|${gkey(g)}`] = failed;
           if (failed.includes("站点限流")) limited.add(g.site_id); // 这个站点剩下的分组不再请求
         }
       }
@@ -1405,8 +1423,10 @@ async function loadBills(siteId: string, force: boolean) {
         byGroup.set(gk, { perM: u.cost_per_m_effective, c24: u.cost_24h ?? null, c24cap: u.tokens_24h_capped ?? false, t24: u.tokens_24h ?? null, currency: u.currency, at: u.fetched_at, reqs: u.total_requests, siteName: l.site_name ?? "", group: l.group ?? "" });
       }
       state.adminBill[k] = byGroup.get(gk)!;
-    } catch {
-      delete state.adminBill[k]; // 读不到就不显示（不退回估算）
+      delete state.fails[`bill|${k}`];
+    } catch (e) {
+      delete state.adminBill[k]; // 读不到就不显示（不退回估算），格子写“读取失败”
+      state.fails[`bill|${k}`] = errText(e);
     }
     state.billPending.delete(k);
     render();
@@ -1439,9 +1459,11 @@ async function loadAdminUsage(siteId: string, force: boolean) {
       const k = adminKey(siteId, sc, id);
       try {
         const u = await backend.adminUsage(siteId, sc, id, force);
-        state.adminUsage[k] = { perM: u.cost_per_m_effective, offM: u.official_cost != null && u.effective_tokens > 0 ? (u.official_cost / u.effective_tokens) * 1e6 : null, currency: u.currency, at: u.fetched_at, frt: u.first_token_median_ms, frtN: u.first_token_samples, cache: u.cache_hit_rate, reqs: u.total_requests, t24: u.tokens_24h ?? null, t24cap: u.tokens_24h_capped ?? false, c24: u.cost_24h ?? null, o24: u.official_cost_24h ?? null };
+        state.adminUsage[k] = { perM: u.cost_per_m_effective, offM: u.official_cost != null && u.effective_tokens > 0 ? (u.official_cost / u.effective_tokens) * 1e6 : null, currency: u.currency, at: u.fetched_at, frt: u.first_token_median_ms, frtN: u.first_token_samples, cache: u.cache_hit_rate, reqs: u.total_requests, t24: u.tokens_24h ?? null, t24cap: u.tokens_24h_capped ?? false, c24: u.cost_24h ?? null, o24: u.official_cost_24h ?? null, note: u.notes.join("；") || undefined };
+        delete state.fails[`adm|${k}`];
       } catch (e) {
         failed = errText(e);
+        state.fails[`adm|${k}`] = failed;
         if (failed.includes("站点限流")) stop = true;
       }
       const l = state.adminLoading[siteId];
@@ -1801,14 +1823,21 @@ function viewOperator(siteId: string): HTMLElement {
     const k = adminKey(siteId, scope, id);
     const e = state.adminUsage[k];
     const pending = loading?.pending.has(k) ?? false;
-    const dash = (what: string, txt = "—") => el("span", { class: `muted small ${pending ? "reading" : "empty"}`, "data-testid": `${scope}-${what}-${id}` }, pending ? "读取中…" : txt);
+    const usageFail = state.fails[`adm|${k}`];
+    const billFail = state.fails[`bill|${k}`];
+    // 没有值时的格子：读取中 / 读取失败（悬停看原因）/ 其他情况写明为什么没有
+    const dash = (what: string, txt = "未读取", tip?: string, failure = usageFail) => {
+      if (pending) return el("span", { class: "muted small reading", "data-testid": `${scope}-${what}-${id}` }, "读取中…");
+      if (failure) return el("span", { class: "muted small fail", "data-tip": `读取失败：${failure}。点顶部刷新重试`, "data-testid": `${scope}-${what}-${id}` }, "读取失败");
+      return el("span", { class: "muted small empty", "data-tip": tip ?? (txt === "未读取" ? "还没读取：点顶部的刷新按钮会读取" : txt), "data-testid": `${scope}-${what}-${id}` }, txt);
+    };
     const costTip = scope === "group" ? "近 7 天所有用户为这个分组实际支付 ÷ 有效 Token（输入+输出）× 100 万，是你的收入口径" : state.sites.find((x) => x.id === siteId)?.kind === "newapi" ? "近 7 天经过这个渠道的调用，用户支付的额度 ÷ 有效 Token × 100 万。new-api 不记录上游收了你多少，这不是上游成本" : "近 7 天这个上游账号的成本（官方价 × 账号倍率）÷ 有效 Token（输入+输出）× 100 万，是你付给上游的成本";
     const frt = e?.frt ?? null;
     const cache = cacheShown(e);
     const bill = scope === "account" ? state.adminBill[k] : undefined;
     const billPending = scope === "account" && state.billPending.has(k);
     return [
-      el("div", { class: "cell-speed" }, frt !== null ? el("span", { class: "pill", "data-tip": `真实首字时延（近 7 天 ${e!.frtN} 个请求的中位数，来自站点的使用记录）`, "data-testid": `${scope}-speed-${id}` }, `${(frt / 1000).toFixed(2)}s`) : dash("speed")),
+      el("div", { class: "cell-speed" }, frt !== null ? el("span", { class: "pill", "data-tip": `真实首字时延（近 7 天 ${e!.frtN} 个请求的中位数，来自站点的使用记录）`, "data-testid": `${scope}-speed-${id}` }, `${(frt / 1000).toFixed(2)}s`) : e ? dash("speed", "无记录", `${e.note ? e.note + "；" : ""}近 7 天没有带首字时间的流式请求（只有流式请求才会记录首字时延）`) : dash("speed")),
       el(
         "div",
         { class: "cell-rate" },
@@ -1824,7 +1853,7 @@ function viewOperator(siteId: string): HTMLElement {
           ? el("button", { class: "rate hint", "data-tip": "按账号名称末尾的数字推测的上游倍率，仅供参考,可关联真实上游的分组，实现倍率监控", "data-testid": `${scope}-rate-${id}`, onClick: () => (hintHost ? openAdd(null, hintHost) : undefined) }, `×${rateHint}`)
           : rate !== null
             ? el("span", { class: "rate", "data-tip": scope === "account" ? "站点里这个上游账号的计费倍率设置：你付给上游的价 = 官方价 × 它。如果和实际不符，请在站点后台把账号倍率改成上游的真实倍率" : "这个分组的计费倍率", "data-testid": `${scope}-rate-${id}` }, `×${rate}`)
-            : dash("rate"),
+            : dash("rate", "未设置", "站点里没有给这一项设置倍率"),
       ),
       el(
         "div",
@@ -1835,24 +1864,24 @@ function viewOperator(siteId: string): HTMLElement {
             ? el("span", { class: "rate", "data-tip": `真实账单：你在上游站点「${bill.siteName}」的分组「${bill.group}」近 7 天实际被扣的钱 ÷ 有效 Token（输入+输出）× 100 万。来自上游站点自己的用量记录，不是估算；如果你的账号在这个分组里还有别的 Key 在用，这里也包含它们；取数于 ${fullTime(bill.at)}`, "data-testid": `${scope}-cost-${id}` }, money(bill.currency, bill.perM))
             : billPending
               ? dash("cost")
-              : dash("cost", linkInfo?.link.group_id ? "无用量" : "未关联")
+              : dash("cost", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组近 7 天没有用量记录，没有账单可算" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费，不估算", billFail)
           : e && e.perM !== null
             ? el("span", { class: "rate", "data-tip": `${costTip}；取数于 ${fullTime(e.at)}`, "data-testid": `${scope}-cost-${id}` }, money(e.currency, e.perM))
-            : dash("cost", e ? "无用量" : "—"),
+            : dash("cost", e ? "无用量" : "未读取", e ? "近 7 天没有用量" : undefined),
       ),
       el(
         "div",
         { class: "cell-cache" },
         cache !== null
           ? el("span", { class: "pill", "data-tip": CACHE_NOTE, "data-testid": `${scope}-cache-${id}` }, pct(cache))
-          : dash("cache", e && e.reqs !== undefined && e.reqs < MIN_CACHE_REQUESTS ? "无有效统计" : "—"),
+          : e && e.reqs !== undefined && e.reqs < MIN_CACHE_REQUESTS ? dash("cache", "无有效统计", `近 7 天只有 ${e.reqs} 次调用。${CACHE_NOTE}`) : e ? dash("cache", "无输入", "近 7 天没有可统计的输入，算不出命中率") : dash("cache"),
       ),
       el(
         "div",
         { class: "cell-tokens" },
         (() => {
           const fl = flow24(scope, e, bill);
-          if (fl === null) return billPending ? dash("tokens") : dash("tokens", scope === "account" && !bill ? "未关联" : "—");
+          if (fl === null) return billPending ? dash("tokens") : scope === "account" ? dash("tokens", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组 24 小时内没有扣费记录" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费", billFail) : dash("tokens", e ? "无流水" : "未读取", e ? `${e.note ? e.note + "；" : ""}没有读到 24 小时流水（站点没有返回这项数据，或近 24 小时没有调用）` : undefined);
           const t24 = scope === "group" ? e?.t24 : bill?.t24;
           const cap = scope === "group" ? e?.t24cap : bill?.c24cap;
           const tokens = t24 != null ? `Token ${cap ? "≥" : ""}${fmtTok(t24)}（输入+输出+缓存）` : "";
@@ -1862,7 +1891,7 @@ function viewOperator(siteId: string): HTMLElement {
           return el("span", { class: `pill flow ${scope === "group" ? "in" : "out"}`, "data-tip": tip, "data-testid": `${scope}-tokens-${id}` }, `${scope === "group" ? "+" : "-"}${cap ? "≥" : ""}${money(cur, fl)}`);
         })(),
       ),
-      el("div", { class: "cell-models" }, models.length ? el("span", { class: "pill", "data-tip": modelTip(models), "data-tip-mono": "1", "data-testid": `${scope}-models-${id}` }, `${models.length} 个模型`) : dash("models")),
+      el("div", { class: "cell-models" }, models.length ? el("span", { class: "pill", "data-tip": modelTip(models), "data-tip-mono": "1", "data-testid": `${scope}-models-${id}` }, `${models.length} 个模型`) : dash("models", "无模型", "没有读到支持的模型：站点没有开放模型列表，或这个上游账号 / 分组下没有可用模型")),
     ];
   };
   const upsOf = (gid: string) => d.upstreams.filter((u) => u.groups.includes(gid));
@@ -1878,8 +1907,8 @@ function viewOperator(siteId: string): HTMLElement {
         "div",
         { class: "card-action two" },
         el("button", { class: "act-btn", "aria-label": "添加上游", "data-tip": "给这个下游分组添加上游：自动在上游站点建 Key，并在你的站点创建上游账号", "data-testid": `down-addup-${x.id}`, onClick: () => openAddUpstream(siteId, x) }, plusIcon()),
-        el("button", { class: "act-btn danger", "aria-label": "删除分组", "data-tip": "删除这个下游分组（绑在上面的上游账号不会被删）", "data-testid": `down-remove-${x.id}`, onClick: () => askRemoveGroup(siteId, x) }, trashIcon()),
         el("button", { class: "act-btn", "aria-label": "编辑分组", "data-tip": x.editable ? "编辑名称、备注、分类、倍率" : "当前账号没有修改分组的权限（new-api 的分组设置只有超级管理员能改）", "data-testid": `down-edit-${x.id}`, disabled: !x.editable, onClick: () => openGroupEdit(siteId, x) }, pencilIcon()),
+        el("button", { class: "act-btn danger", "aria-label": "删除分组", "data-tip": "删除这个下游分组（绑在上面的上游账号不会被删）", "data-testid": `down-remove-${x.id}`, onClick: () => askRemoveGroup(siteId, x) }, trashIcon()),
       ),
     );
   };

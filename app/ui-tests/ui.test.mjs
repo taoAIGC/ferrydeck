@@ -1324,7 +1324,9 @@ test("成本抽屉：Esc、关闭按钮、点遮罩都能关；没有用量时�
   // 读取失败：列表里没有数字，列表的“—”点不开；抽屉的失败状态由重新取数覆盖
   const q = await open("sites1,usagefail");
   await T(q, "group-card-alpha-2").waitFor();
-  await q.waitForFunction(() => document.querySelector('[data-testid="cost-val-alpha-2"]')?.textContent === "—");
+  await q.waitForFunction(() => document.querySelector('[data-testid="cost-val-alpha-2"]')?.textContent === "读取失败");
+  await T(q, "cost-val-alpha-2").hover();
+  await q.waitForFunction(() => /成本读取失败：站点限流了/.test(document.getElementById("fd-tip")?.textContent ?? ""));
   await done(q);
 });
 
@@ -1749,6 +1751,10 @@ test("站长视角：10 分钟内读过的用量不重复请求，点重新读�
   await T(q, "operator-alpha").click();
   await T(q, "toast").waitFor();
   assert.match(await T(q, "toast").textContent(), /部分用量没有读到：站点限流了/);
+  const failedCell = q.locator('.muted.fail:has-text("读取失败")').first();
+  await failedCell.waitFor();
+  await failedCell.hover();
+  await q.waitForFunction(() => /读取失败：站点限流了.*点顶部刷新重试/.test(document.getElementById("fd-tip")?.textContent ?? ""));
   await done(q);
 });
 

@@ -46,6 +46,8 @@ pub struct Http {
     /// 被站点 429 限流的接口 → 解封时间（unix 秒）。冷却期内不再向该接口发请求：
     /// 限流窗口里继续敲只会让情况更糟，也浪费用户的额度。
     cooldown: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    /// 用量日志接口（`/api/log/`）限得很紧（new-api 实测约 2~3 秒一次，429 时 Retry-After 只有 1~2 秒）：同一站点的日志请求排队一个一个发。
+    log_lane: tokio::sync::Mutex<()>,
 }
 
 pub struct Resp {
@@ -170,7 +172,7 @@ impl Http {
             b = b.no_proxy();
         }
         let client = b.build().expect("构建 HTTP 客户端失败");
-        Http { base: base.trim_end_matches('/').to_string(), client, cooldown: Default::default() }
+        Http { base: base.trim_end_matches('/').to_string(), client, cooldown: Default::default(), log_lane: Default::default() }
     }
 
     fn cooldown_left(&self, key: &str) -> i64 {
@@ -192,6 +194,9 @@ impl Http {
         if left > 0 {
             return Err(rate_limited_message(left)); // 还在冷却：不发请求
         }
+        // 日志接口排队；站点要求等的时间很短（≤10 秒）就等一下再发，最多等 4 次，而不是直接报“限流”
+        let _lane = if path.starts_with("/api/log/") { Some(self.log_lane.lock().await) } else { None };
+        let mut short_waits = 0;
         let mut last = String::new();
         for attempt in 0..2 {
             let mut rq = self.client.request(m.clone(), format!("{}{}", self.base, path));
@@ -215,6 +220,12 @@ impl Http {
                         return Err(redirect_notice(&headers));
                     }
                     if status.as_u16() == 429 {
+                        let hinted = headers.get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+                        if let (true, Some(w)) = (idempotent && short_waits < 4, hinted.filter(|w| *w <= 10)) {
+                            short_waits += 1;
+                            tokio::time::sleep(Duration::from_millis(w * 1000 + 400)).await;
+                            continue;
+                        }
                         let secs = retry_after_secs(&headers);
                         self.start_cooldown(&ep, secs);
                         return Err(rate_limited_message(secs));

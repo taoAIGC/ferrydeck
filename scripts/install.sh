@@ -10,7 +10,13 @@ set -eu
 
 BASE="${FERRYDECK_DL_BASE:-@DL_BASE@}"   # 发布时由 release.sh 填入真实的下载站地址
 APP="Ferrydeck.app"
-PKG="Ferrydeck.app.tar.gz"
+# 按本机芯片选安装包：Apple 芯片 = aarch64，Intel = x64（也可以用 FERRYDECK_ARCH=aarch64|x64 手动指定）
+case "${FERRYDECK_ARCH:-$(uname -m)}" in
+  arm64|aarch64) ARCH=aarch64 ;;
+  x86_64|x64) ARCH=x64 ;;
+  *) printf '安装失败：不认识的芯片架构 %s\n' "$(uname -m)" >&2; exit 1 ;;
+esac
+PKG="Ferrydeck_${ARCH}.app.tar.gz"
 
 case "$BASE" in *@DL_BASE@*) printf '%s\n' "这是未经发布处理的安装脚本，请设置 FERRYDECK_DL_BASE 后再运行，或使用发布出来的 install.sh" >&2; exit 1;; esac
 
@@ -31,7 +37,7 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-say "正在下载Ferrydeck …"
+say "正在下载 Ferrydeck（${ARCH}）…"
 curl -fL --retry 3 --retry-delay 2 --progress-bar "$BASE/$PKG" -o "$TMP/$PKG" || fail "下载失败，请检查网络"
 curl -fsSL --retry 3 "$BASE/SHA256SUMS" -o "$TMP/SHA256SUMS" || fail "下载校验文件失败"
 

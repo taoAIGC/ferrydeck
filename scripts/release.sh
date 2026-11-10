@@ -13,21 +13,26 @@ if [ -f .release.env ]; then
 fi
 : "${FERRYDECK_DL_BASE:?请先设置 FERRYDECK_DL_BASE（下载站地址，如 https://example.com/desktop），见 scripts/release.env.example}"
 APP_DIR="app/src-tauri"
-BUNDLE="$APP_DIR/target/universal-apple-darwin/release/bundle"
 VERSION="$(python3 -c "import json;print(json.load(open('$APP_DIR/tauri.conf.json'))['version'])")"
 NOTES="${1:-Ferrydeck $VERSION}"
 BASE_URL="${FERRYDECK_DL_BASE%/}"
 OUT="release/desktop"
 
-tgz="$BUNDLE/macos/Ferrydeck.app.tar.gz"
-sig="$tgz.sig"
-dmg="$(ls "$BUNDLE"/dmg/*.dmg | head -n1)"
-for f in "$tgz" "$sig" "$dmg"; do [ -f "$f" ] || { echo "缺少构建产物：${f}（先执行构建）" >&2; exit 1; }; done
-
+# 两个架构各一套安装文件，让用户自己选：Apple 芯片（M1/M2/M3…）= aarch64，Intel = x64
+#   构建：npm run tauri build -- --target aarch64-apple-darwin / --target x86_64-apple-darwin
+ARCHS="aarch64:aarch64-apple-darwin x64:x86_64-apple-darwin"
 rm -rf "$OUT"; mkdir -p "$OUT"
-cp "$tgz" "$OUT/Ferrydeck.app.tar.gz"
-cp "$sig" "$OUT/Ferrydeck.app.tar.gz.sig"
-cp "$dmg" "$OUT/Ferrydeck.dmg"
+for pair in $ARCHS; do
+  name="${pair%%:*}"; triple="${pair#*:}"
+  bundle="$APP_DIR/target/$triple/release/bundle"
+  tgz="$bundle/macos/Ferrydeck.app.tar.gz"
+  sig="$tgz.sig"
+  dmg="$(ls "$bundle"/dmg/*.dmg 2>/dev/null | head -n1 || true)"
+  for f in "$tgz" "$sig" "$dmg"; do [ -f "$f" ] || { echo "缺少构建产物：${f}（先构建 ${triple}）" >&2; exit 1; }; done
+  cp "$tgz" "$OUT/Ferrydeck_${name}.app.tar.gz"
+  cp "$sig" "$OUT/Ferrydeck_${name}.app.tar.gz.sig"
+  cp "$dmg" "$OUT/Ferrydeck_${name}.dmg"
+done
 # 把下载站地址写进发给用户的安装脚本里
 sed "s|@DL_BASE@|$BASE_URL|g" scripts/install.sh > "$OUT/install.sh" && chmod +x "$OUT/install.sh"
 
@@ -41,18 +46,17 @@ fi
 python3 - "$OUT" "$VERSION" "$NOTES" "$BASE_URL" <<'PY'
 import json, sys, datetime
 out, version, notes, base = sys.argv[1:5]
-sig = open(f"{out}/Ferrydeck.app.tar.gz.sig").read().strip()
-url = f"{base}/Ferrydeck.app.tar.gz"
-entry = {"signature": sig, "url": url}
+def entry(name):
+    return {"signature": open(f"{out}/Ferrydeck_{name}.app.tar.gz.sig").read().strip(), "url": f"{base}/Ferrydeck_{name}.app.tar.gz"}
 latest = {
     "version": version,
     "notes": notes,
     "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    # Universal 包同时适用于两种架构
-    "platforms": {"darwin-aarch64": entry, "darwin-x86_64": entry},
+    # 应用内更新按架构各取各的包
+    "platforms": {"darwin-aarch64": entry("aarch64"), "darwin-x86_64": entry("x64")},
 }
 json.dump(latest, open(f"{out}/latest.json", "w"), ensure_ascii=False, indent=2)
 PY
 
-( cd "$OUT" && shasum -a 256 Ferrydeck.app.tar.gz Ferrydeck.dmg install.sh > SHA256SUMS )
+( cd "$OUT" && shasum -a 256 Ferrydeck_*.app.tar.gz Ferrydeck_*.dmg install.sh > SHA256SUMS )
 echo "已生成 ${OUT}（版本 ${VERSION}）："; ls -la "$OUT"

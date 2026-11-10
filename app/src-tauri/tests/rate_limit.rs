@@ -163,3 +163,14 @@ async fn no_key_is_created_when_it_could_not_be_read_back() {
     let e = c.ensure_key(&group("Brand New")).await.unwrap_err();
     assert!(is_rate_limited(&e), "{e}");
 }
+
+#[tokio::test]
+async fn short_retry_after_on_the_log_endpoint_waits_and_retries_instead_of_failing() {
+    // new-api 的日志接口 2~3 秒才放行一次，429 时 Retry-After 只有 1~2 秒：应该等一下再发，而不是让整个成本读取失败
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/log/self")).respond_with(limited("1")).up_to_n_times(1).mount(&s).await;
+    Mock::given(method("GET")).and(path("/api/log/self")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true}))).mount(&s).await;
+    let h = Http::new(&s.uri());
+    let r = h.send(Method::GET, "/api/log/self?p=1", None, None, &[], None).await;
+    assert!(r.is_ok(), "{:?}", r.err());
+}

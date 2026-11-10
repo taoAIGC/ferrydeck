@@ -60,7 +60,12 @@
 
 ## 安装
 
-从 [Releases](https://github.com/taoAIGC/ferrydeck/releases) 页面下载，或使用安装脚本：
+从 [Releases](https://github.com/taoAIGC/ferrydeck/releases) 页面按自己的电脑下载 dmg：
+
+- **Ferrydeck_aarch64.dmg**：Apple 芯片（M1 / M2 / M3 / M4…，「关于本机」里芯片显示 Apple M 系列）
+- **Ferrydeck_x64.dmg**：Intel 芯片的 Mac
+
+或使用安装脚本（自动按本机芯片选包）：
 
 ```bash
 curl -fsSL https://github.com/taoAIGC/ferrydeck/releases/latest/download/install.sh | sh
@@ -160,7 +165,8 @@ docs/                     设计说明、截图
 cd app
 export TAURI_SIGNING_PRIVATE_KEY=~/.tauri/my-updater.key       # 私钥文件路径或内容
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-npm run tauri build -- --target universal-apple-darwin          # 同时支持 Intel 与 Apple 芯片
+npm run tauri build -- --target aarch64-apple-darwin           # Apple 芯片
+npm run tauri build -- --target x86_64-apple-darwin            # Intel
 cd .. && scripts/release.sh "更新说明"                            # 生成 release/desktop/，并检查更新地址与下载站是否一致
 scripts/deploy.sh            # 演练，只显示会上传什么
 scripts/deploy.sh --yes      # 真正上传并检查线上
