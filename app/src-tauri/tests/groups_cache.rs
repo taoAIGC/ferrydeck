@@ -23,7 +23,7 @@ async fn setup(groups_mock_times: Option<u64>) -> (MockServer, std::sync::Arc<Si
         None => m.mount(&s).await,
     }
     let t = TempDir::new().unwrap();
-    let rt = AppState::make_runtime(&Paths::under(t.path()), Site { id: "s1".into(), kind: Kind::Sub2api, name: "S".into(), base_url: s.uri() });
+    let rt = AppState::make_runtime(&Paths::under(t.path()), Site { id: "s1".into(), kind: Kind::Sub2api, name: "S".into(), base_url: s.uri(), is_admin: false });
     rt.client.login("a@b.c", "pw").await.unwrap();
     (s, rt, t)
 }
@@ -67,7 +67,7 @@ async fn a_failed_pull_keeps_the_old_groups_and_the_old_timestamp() {
     Mock::given(method("GET")).and(path("/api/v1/groups/available")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 0, "data": [{"id": 2, "name": "A", "platform": "anthropic", "rate_multiplier": 1.0, "status": "active"}]}))).up_to_n_times(1).mount(&s).await;
     Mock::given(method("GET")).and(path("/api/v1/groups/available")).respond_with(ResponseTemplate::new(503)).with_priority(10).mount(&s).await;
     let t = TempDir::new().unwrap();
-    let rt = AppState::make_runtime(&Paths::under(t.path()), Site { id: "s1".into(), kind: Kind::Sub2api, name: "S".into(), base_url: s.uri() });
+    let rt = AppState::make_runtime(&Paths::under(t.path()), Site { id: "s1".into(), kind: Kind::Sub2api, name: "S".into(), base_url: s.uri(), is_admin: false });
     rt.client.login("a@b.c", "pw").await.unwrap();
     site_groups_or_cached(&rt, 0).await;
     let at = rt.last_groups_at.load(Ordering::Relaxed);

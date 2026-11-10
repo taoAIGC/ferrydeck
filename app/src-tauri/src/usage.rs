@@ -63,6 +63,13 @@ pub struct GroupUsage {
     pub first_token_p90_ms: Option<u64>,
     pub first_token_samples: usize,
     pub avg_duration_ms: Option<f64>,
+    /// 过去 24 小时的 Token 总量（输入 + 输出 + 缓存），代表这个分组 / 上游的重要程度。只有站长视角会算。
+    pub tokens_24h: Option<i64>,
+    /// 只统计了最近一部分记录，真实值比这个大。
+    pub tokens_24h_capped: bool,
+    /// 过去 24 小时的流水：用户实付（站点货币）和官方价口径的合计（只有 sub2api 有）。下游分组的收入 = 实付；上游账号的成本 = 官方价 × 上游倍率。
+    pub cost_24h: Option<f64>,
+    pub official_cost_24h: Option<f64>,
     /// 只统计了最近一部分请求（new-api 按日志翻页，有上限）：这里是实际统计的条数，`total_requests` 是窗口内的总条数。
     pub sampled: bool,
     pub sample_requests: usize,

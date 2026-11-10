@@ -35,6 +35,9 @@ pub struct Site {
     pub kind: Kind,
     pub name: String,
     pub base_url: String,
+    /// 用户登录时声明“我是该站点管理员”：左侧会出现“我的中转站”，用于上下游一体管理。旧版本的记录里没有这个字段，按 false 处理。
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 /// 统一后的分组。`id` 在站点内唯一（sub2api 是数字转字符串，new-api 直接用分组名）。
@@ -74,6 +77,8 @@ pub struct Probe {
     pub chars: usize,
     /// 站点报告的输入 token 数（“hi” 这样的空请求的基线）；站点没报告就是 None。
     pub input_tokens: Option<u64>,
+    /// 模型回复的文字（前 400 个字符），“sayhi”测试里给用户看效果。
+    pub text: String,
 }
 
 impl SiteClient {
@@ -145,6 +150,86 @@ impl SiteClient {
 
 
 
+    // ---- 站长：上下游一体管理 ----
+
+    pub async fn admin_probe(&self) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_probe().await,
+            SiteClient::NewApi(c) => c.admin_probe().await,
+        }
+    }
+
+    pub async fn admin_overview(&self) -> Result<crate::admin::AdminOverview, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_overview().await,
+            SiteClient::NewApi(c) => c.admin_overview().await,
+        }
+    }
+
+    pub async fn admin_usage(&self, scope: &str, id: &str) -> Result<crate::usage::GroupUsage, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_usage(scope, id).await,
+            SiteClient::NewApi(c) => c.admin_usage(scope, id).await,
+        }
+    }
+
+    pub async fn admin_create_group(&self, g: &crate::admin::NewGroup) -> Result<String, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_create_group(g).await,
+            SiteClient::NewApi(c) => c.admin_create_group(g).await,
+        }
+    }
+
+    pub async fn admin_create_upstream(&self, u: &crate::admin::NewUpstream) -> Result<String, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_create_upstream(u).await,
+            SiteClient::NewApi(c) => c.admin_create_upstream(u).await,
+        }
+    }
+
+    pub async fn admin_remove_group(&self, id: &str) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_remove_group(id).await,
+            SiteClient::NewApi(c) => c.admin_remove_group(id).await,
+        }
+    }
+
+    /// 就地更换上游账号的来源（sub2api）；new-api 要由调用方“新建再删旧”（见 `lib.rs` 的 `replace_upstream`）。
+    pub async fn admin_update_upstream_source(&self, id: &str, u: &crate::admin::NewUpstream) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_update_upstream_source(id, u).await,
+            SiteClient::NewApi(c) => c.admin_update_upstream_source(id, u).await,
+        }
+    }
+
+    pub async fn admin_set_account_status(&self, id: &str, status: &str) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_set_account_status(id, status).await,
+            SiteClient::NewApi(c) => c.admin_set_account_status(id, status).await,
+        }
+    }
+
+    pub async fn admin_set_paused(&self, id: &str, paused: bool) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_set_paused(id, paused).await,
+            SiteClient::NewApi(c) => c.admin_set_paused(id, paused).await,
+        }
+    }
+
+    pub async fn admin_remove_upstream(&self, id: &str) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_remove_upstream(id).await,
+            SiteClient::NewApi(c) => c.admin_remove_upstream(id).await,
+        }
+    }
+
+    pub async fn admin_update_group(&self, id: &str, edit: &crate::admin::GroupEdit) -> Result<(), String> {
+        match self {
+            SiteClient::Sub2api(c) => c.admin_update_group(id, edit).await,
+            SiteClient::NewApi(c) => c.admin_update_group(id, edit).await,
+        }
+    }
+
     /// 近 7 天这个分组的成本统计（实付、token、缓存、真实首字时延、预估价格）。
     pub async fn group_usage(&self, group: &GroupInfo) -> Result<crate::usage::GroupUsage, String> {
         match self {
@@ -158,6 +243,14 @@ impl SiteClient {
         match self {
             SiteClient::Sub2api(c) => c.ensure_key(group).await,
             SiteClient::NewApi(c) => c.ensure_key(group).await,
+        }
+    }
+
+    /// 读该 Key 能用的模型；读不到时带上站点的原话（余额不足等）。
+    pub async fn models_result(&self, key: &str) -> Result<Vec<String>, String> {
+        match self {
+            SiteClient::Sub2api(c) => c.models_result(key).await,
+            SiteClient::NewApi(c) => c.models_result(key).await,
         }
     }
 
@@ -180,6 +273,11 @@ impl SiteClient {
     /// 测速：用该分组的 Key 发一个最小的流式请求，返回首字延迟与总耗时（毫秒）。
     pub async fn probe(&self, key: &str, model: &str, wire: http::ProbeWire) -> Result<Probe, String> {
         http::Http::new(self.base()).probe(key, model, wire).await
+    }
+
+    /// 同 `probe`，但允许多回一些（sayhi 测试要看到完整的一句回复）。
+    pub async fn probe_with(&self, key: &str, model: &str, wire: http::ProbeWire, max_tokens: u32) -> Result<Probe, String> {
+        http::Http::new(self.base()).probe_with(key, model, wire, max_tokens).await
     }
 
     /// 删除指定名称的 Key（端到端测试清理用）。
@@ -245,9 +343,7 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     }
     let host = host_port.rsplit_once(':').map(|(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host_port }).unwrap_or(host_port);
     let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
-    if scheme == "http" && !is_local {
-        return Err("出于安全考虑，只支持 https 站点（本机地址除外）".into());
-    }
+    // http 站点也支持（不少自建站没有证书）：界面会提醒账号密码是明文传输的
     if !is_local && !host.contains('.') {
         return Err("站点地址格式不正确".into());
     }

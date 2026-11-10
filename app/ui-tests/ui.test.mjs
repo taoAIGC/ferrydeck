@@ -24,7 +24,7 @@ after(async () => {
 });
 
 /** 打开一个干净页面，并收集页面错误/控制台错误。 */
-async function open(scenario = "", viewport = { width: 960, height: 680 }, { speedConfirmed = true } = {}) {
+async function open(scenario = "", viewport = { width: 1100, height: 680 }, { speedConfirmed = true } = {}) {
   const ctx = await browser.newContext({ viewport });
   // 第一次测速前会弹说明框；多数测试不关心它，预先标记为已确认
   if (speedConfirmed) await ctx.addInitScript(() => localStorage.setItem("ferrydeck.speedConfirmed", "1"));
@@ -36,6 +36,21 @@ async function open(scenario = "", viewport = { width: 960, height: 680 }, { spe
   return page;
 }
 const T = (page, id) => page.getByTestId(id);
+/** 悬停到某个站点卡片：先把鼠标移开（上一张卡片悬停时的图标条会压在相邻卡片上），免得它挡住目标。 */
+const hoverTab = async (page, id) => { await page.mouse.move(0, 0); await page.waitForTimeout(160); await T(page, id).hover(); };
+/** 在站点卡片上点右键，选菜单项（console / topup / remove）。 */
+const ctx = async (page, id, item) => { await T(page, id).click({ button: "right" }); await T(page, `ctx-${item}`).click(); };
+/** 点上游账号的“关联 / ×N?”药丸打开编辑弹窗，选上游站点和分组，提交（更换来源 = 关联）。 */
+const linkVia = async (page, upId, { site, group } = {}) => {
+  await T(page, `account-rate-${upId}`).first().click();
+  await T(page, "add-upstream-dialog").waitFor();
+  if (site) await T(page, "au-site").selectOption(site);
+  if (group) await T(page, "au-group").selectOption(group);
+  await T(page, "au-submit").click();
+  await T(page, "add-upstream-result").waitFor();
+  await T(page, "au-done").click();
+  await T(page, "add-upstream-dialog").waitFor({ state: "detached" });
+};
 const selectedClient = (page) => page.evaluate(() => document.querySelector(".side-item.selected")?.getAttribute("data-testid"));
 const count = (page, sel) => page.locator(sel).count();
 const cards = (page) => count(page, '[data-testid^="group-card-"]');
@@ -45,7 +60,8 @@ async function done(page) {
 }
 /** 走完“添加站点”两步。 */
 async function addSite(page, url, { user = "me@example.com", pw = "ok123", name } = {}) {
-  await T(page, "add-site").click();
+  // 还没有站点时没有站点 tab（也就没有“＋”），用欢迎页上的按钮
+  await T(page, (await count(page, '[data-testid="add-site"]')) ? "add-site" : "empty-sites-add").click();
   await T(page, "add-url").fill(url);
   await T(page, "add-submit").click();
   await T(page, "add-username").waitFor();
@@ -70,14 +86,13 @@ test("首次启动没有站点：显示欢迎页和添加入口，客户端显�
   await done(p);
 });
 
-test("添加站点第一步：空地址、未知地址、明文 http、需要人机验证都给出明确提示，且停留在第一步", async () => {
+test("添加站点第一步：空地址、未知地址、需要人机验证都给出明确提示，且停留在第一步；http 站点不拒绝，只提示明文传输", async () => {
   const p = await open();
   await T(p, "empty-sites-add").click();
   await T(p, "add-submit").click();
   assert.equal(await T(p, "add-error").textContent(), "请输入站点地址");
   for (const [url, re] of [
     ["unknown.example.org", /无法识别该站点类型/],
-    ["http://alpha.example.com", /只支持 https/],
     ["captcha.example.com", /人机验证/],
   ]) {
     await T(p, "add-url").fill(url);
@@ -86,6 +101,15 @@ test("添加站点第一步：空地址、未知地址、明文 http、需要人
     assert.equal(await T(p, "add-url").count(), 1, `${url} 应停留在地址步骤`);
     assert.equal(await T(p, "add-submit").textContent(), "下一步");
   }
+  // http 站点：不再被拒绝；输入 http:// 开头时提示账号密码会明文传输
+  await T(p, "add-url").fill("https://alpha.example.com");
+  assert.equal(await T(p, "add-http-warn").isVisible(), false, "https 不提示");
+  await T(p, "add-url").fill("http://173.231.49.42:3200");
+  assert.equal(await T(p, "add-http-warn").isVisible(), true);
+  assert.match(await T(p, "add-http-warn").textContent(), /明文传输/);
+  await T(p, "add-submit").click();
+  await p.waitForFunction(() => /无法识别该站点类型/.test(document.querySelector('[data-testid="add-error"]')?.textContent ?? ""));
+  assert.doesNotMatch(await T(p, "add-error").textContent(), /只支持 https/, "不再因为是 http 就拒绝");
   await done(p);
 });
 
@@ -139,7 +163,7 @@ test("添加成功：对话框关闭、站点卡和余额出现、分组列表�
   assert.equal(await selectedClient(p), "client-claude");
   assert.equal(await cards(p), 3, "Claude 类分组 3 个");
   assert.equal(await count(p, '[data-testid="unsupported"]'), 0, "不展示不支持的分组");
-  assert.equal(await count(p, '[data-testid="site-filter"]'), 0, "只有一个站点时不显示站点筛选");
+  assert.equal(await count(p, '[data-testid="site-tab-all"]'), 0, "只有一个站点时不显示“全部站点”");
   assert.equal(await count(p, '[data-testid^="site-tag-"]'), 0, "只有一个站点时不显示站点标签");
   assert.equal(await count(p, '[data-testid="empty-sites"]'), 0);
   await p.screenshot({ path: "ui-tests/shots/one-site.png" });
@@ -158,7 +182,7 @@ test("对话框里按回车可以提交；重复添加同一站点视为重新�
   await T(p, "add-password").press("Enter");
   await waitText(p, "toast", /已重新登录/);
   // 站点卡上新增了“站点名称按钮”和图标按钮，这里只数站点卡本身
-  assert.equal(await count(p, '.site-card'), 1, "仍然只有一个站点");
+  assert.equal(await count(p, '.site-tab:not(.add)'), 1, "仍然只有一个站点");
   await done(p);
 });
 
@@ -182,12 +206,13 @@ test("两个站点：分组合并显示，同名分组并存并带站点标签�
 test("站点筛选：只看某个站点，再切回全部；筛选后该站点没有这个客户端的分组时给出说明", async () => {
   const p = await open("sites2");
   await T(p, "group-card-alpha-2").waitFor();
-  await T(p, "site-filter").selectOption("beta");
+  await T(p, "site-name-beta").click();
   assert.equal(await cards(p), 1);
   assert.equal(await count(p, '[data-testid="group-card-beta-Claude 逆向Kiro"]'), 1);
   await T(p, "client-gemini").click();
   assert.match(await T(p, "empty-client").textContent(), /这个站点没有可用于 Gemini CLI 的分组/);
-  await T(p, "site-filter").selectOption("all");
+  await p.mouse.move(0, 0);
+  await T(p, "site-tab-all").click();
   assert.equal(await cards(p), 1, "Gemini 只有 Alpha 的一个分组");
   await T(p, "client-codex").click();
   assert.equal(await cards(p), 2, "Codex：Alpha 的 GPT 福利 + Beta 的 GPT Pro");
@@ -280,8 +305,9 @@ test("登录过期的站点：红色提示、只有重新登录和移除；它�
   await T(p, "site-error-beta").waitFor();
   assert.match(await T(p, "site-error-beta").textContent(), /登录已过期/);
   assert.equal(await count(p, '[data-testid="retry-beta"]'), 0, "登录失效只能重新登录，没有重试");
-  assert.equal(await count(p, '[data-testid="topup-beta"]'), 1, "不管登录状态如何，充值和移除两个图标都有（悬停时显示）");
-  assert.equal(await count(p, '[data-testid="topup-alpha"]'), 1);
+  await T(p, "site-beta").click({ button: "right" });
+  assert.equal(await count(p, `[data-testid="ctx-topup"]`), 1, "不管登录状态如何，右键都有控制台、充值、删除");
+  await p.keyboard.press("Escape");
   assert.equal(await cards(p), 3, "只剩 Alpha 的分组");
   assert.equal(await count(p, '[data-testid^="group-card-beta-"]'), 0);
   await T(p, "relogin-beta").click();
@@ -320,26 +346,26 @@ test("移除站点：先确认；取消不动；确认后站点和它的分组�
   const p = await open("sites2");
   await T(p, "enable-beta-Claude 逆向Kiro").click();
   await p.waitForFunction(() => document.querySelector('[data-testid="client-status-claude"]')?.textContent === "Beta · Claude 逆向Kiro");
-  await T(p, "remove-beta").click();
+  await ctx(p, "site-beta", "remove");
   assert.match(await T(p, "remove-dialog").textContent(), /移除站点「Beta」/);
   assert.match(await T(p, "remove-dialog").textContent(), /不会被删除/);
   await T(p, "remove-cancel").click();
   assert.equal(await count(p, '[data-testid="remove-dialog"]'), 0);
   assert.equal(await count(p, '[data-testid="site-beta"]'), 1);
-  await T(p, "remove-beta").click();
+  await ctx(p, "site-beta", "remove");
   await T(p, "remove-confirm").click();
   await waitText(p, "toast", /已移除站点「Beta」/);
   assert.equal(await count(p, '[data-testid="site-beta"]'), 0);
   assert.equal(await count(p, '[data-testid^="group-card-beta-"]'), 0);
   assert.equal(await T(p, "client-status-claude").textContent(), "");
-  assert.equal(await count(p, '[data-testid="site-filter"]'), 0, "回到单站点，筛选和标签消失");
+  assert.equal(await count(p, '[data-testid="site-tab-all"]'), 0, "回到单站点，“全部站点”tab 消失");
   assert.equal(await count(p, '[data-testid^="site-tag-"]'), 0);
   await done(p);
 });
 
 test("移除最后一个站点：回到欢迎页", async () => {
   const p = await open("sites1");
-  await T(p, "remove-alpha").click();
+  await ctx(p, "site-alpha", "remove");
   await T(p, "remove-confirm").click();
   await T(p, "empty-sites").waitFor();
   assert.equal(await cards(p), 0);
@@ -348,11 +374,8 @@ test("移除最后一个站点：回到欢迎页", async () => {
 
 test("去充值：sub2api 打开 /purchase，new-api 打开 /console/topup，页面不跳转", async () => {
   const p = await open("sites2");
-  await T(p, "topup-alpha").waitFor();
-  assert.equal(await T(p, "site-alpha").locator('[data-testid="topup-alpha"]').count(), 1, "按钮在 Alpha 的站点卡里，紧挨着它的余额");
-  assert.equal(await T(p, "site-beta").locator('[data-testid="topup-beta"]').count(), 1);
-  await T(p, "topup-alpha").click();
-  await T(p, "topup-beta").click();
+  await ctx(p, "site-alpha", "topup");
+  await ctx(p, "site-beta", "topup");
   await p.waitForFunction(() => (window.__opened ?? []).length === 2);
   assert.deepEqual(await p.evaluate(() => window.__opened), ["https://alpha.example.com/purchase", "https://beta.example.com/console/topup"]);
   assert.ok(p.url().startsWith(BASE));
@@ -419,7 +442,7 @@ test("更新：顶栏有 GitHub 主页和检查更新（不再显示版本号）
 test("更新：启动时静默发现新版本并显示横幅，点击后安装并触发重启", async () => {
   const p = await open("sites1,update");
   await T(p, "update-banner").waitFor();
-  assert.match(await T(p, "update-banner").textContent(), /发现新版本 0\.4\.0/);
+  assert.match(await T(p, "update-banner").textContent(), /发现新版本 0\.6\.0/);
   assert.equal(await count(p, '[data-testid="toast"]'), 0, "静默检查不应弹提示");
   await T(p, "install-update").click();
   await p.waitForFunction(() => window.__relaunched === true);
@@ -461,8 +484,8 @@ test("分组以横向列表展示：每行一个，名称、倍率、按钮在�
   await done(p);
 });
 
-test("最小窗口 820×560：两个站点、使用中的卡片、站点卡都不溢出", async () => {
-  const p = await open("sites2", { width: 820, height: 560 });
+test("最小窗口 1100×560：两个站点、使用中的卡片、站点卡都不溢出", async () => {
+  const p = await open("sites2", { width: 1100, height: 560 });
   await T(p, "group-card-alpha-2").waitFor();
   await T(p, "enable-beta-Claude 逆向Kiro").click();
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-beta-Claude 逆向Kiro"]')?.textContent.includes("使用中"));
@@ -719,22 +742,22 @@ test("正常启动（没有数据丢失）不会看到丢失提示", async () =>
   await done(p);
 });
 
-test("下拉框展开期间不会被重绘替换：窗口获得焦点触发刷新后，选中的站点立即生效", async () => {
-  const p = await open("sites2");
+test("下拉框展开期间不会被重绘替换：窗口获得焦点触发刷新后，选中的模型立即生效", async () => {
+  const p = await open("sites2,plaza");
   await T(p, "group-card-alpha-2").waitFor();
-  // 用户点开站点下拉框（焦点在 select 上）
-  await T(p, "site-filter").focus();
-  await p.evaluate(() => { window.__sel = document.querySelector('[data-testid="site-filter"]'); });
+  // 用户点开模型下拉框（焦点在 select 上）
+  await T(p, "model-filter").focus();
+  await p.evaluate(() => { window.__sel = document.querySelector('[data-testid="model-filter"]'); });
   // 同时窗口获得焦点，触发余额/分组刷新（过去会把下拉框整个换掉）
   await p.evaluate(() => { const real = Date.now; Date.now = () => real() + 120_000; });
   await p.evaluate(() => window.dispatchEvent(new Event("focus")));
   await p.waitForFunction(() => window.__listGroupsCalls >= 2);
   await p.waitForTimeout(500);
   assert.equal(await p.evaluate(() => document.contains(window.__sel)), true, "刷新没有替换正在用的下拉框");
-  // 此时选中某个站点：第一次就要生效，并且下拉框显示的就是它
-  await T(p, "site-filter").selectOption("beta");
-  assert.equal(await cards(p), 1, "第一次选择就完成了筛选");
-  assert.equal(await T(p, "site-filter").inputValue(), "beta", "下拉框显示的是选中的站点，不是“全部站点”");
+  // 此时选中某个模型：第一次就要生效，并且下拉框显示的就是它
+  await T(p, "model-filter").selectOption("claude-opus-5-5");
+  assert.ok((await cards(p)) < 4, "第一次选择就完成了筛选");
+  assert.equal(await T(p, "model-filter").inputValue(), "claude-opus-5-5", "下拉框显示的是选中的模型");
   // 选完之后被推迟的重绘已补上：刷新时间等内容是最新的
   assert.match(await T(p, "refresh-time").textContent(), /刷新$/);
   await done(p);
@@ -780,7 +803,7 @@ test("切换智能体时清掉模型筛选，不会把 Claude 的筛选带到 Co
   await done(p);
 });
 
-test("模型列：标题里的下拉和每一行的模型数量左边缘对齐，标题的箭头紧贴文字", async () => {
+test("模型列：标题里的下拉和每一行的模型数量居中对齐，标题的箭头紧贴文字", async () => {
   const p = await open("sites2");
   await T(p, "group-card-alpha-2").waitFor();
   await T(p, "speed-test").click();
@@ -792,7 +815,7 @@ test("模型列：标题里的下拉和每一行的模型数量左边缘对齐�
     return { head: { left: head.left, right: head.right }, rows: rows.map((r) => ({ left: r.left, right: r.right })) };
   });
   for (const r of rights.rows) {
-    assert.ok(Math.abs(r.left - rights.head.left) <= 1, `行的左边缘 ${r.left} 和标题的 ${rights.head.left} 对不上`);
+    assert.ok(Math.abs((r.left + r.right) / 2 - (rights.head.left + rights.head.right) / 2) <= 1.5, `行的中心 ${(r.left + r.right) / 2} 和标题的 ${(rights.head.left + rights.head.right) / 2} 对不上`);
   }
   // 标题的下拉框按内容收缩：箭头紧贴“模型”两个字，不被推到整列的最右边
   const headW = await T(p, "model-filter").evaluate((e) => e.getBoundingClientRect().width);
@@ -899,19 +922,21 @@ test("刷新时间用“N秒前 / N分钟前 / N小时前刷新”的写法，�
   await done(p);
 });
 
-test("站点卡的充值/移除图标平时隐藏，悬停到卡片上才显示；分组行的启用图标同理，“使用中”一直显示", async () => {
+test("站点卡没有悬停图标，右键出菜单；分组行的启用图标悬停才显示，“使用中”一直显示", async () => {
   const p = await open("sites2,expired");
   await T(p, "group-card-alpha-2").waitFor();
-  const opacity = (id) => T(p, id).evaluate((e) => getComputedStyle(e.closest(".site-icons") ?? e).opacity);
-  assert.equal(await opacity("topup-alpha"), "0", "默认隐藏");
-  assert.equal(await opacity("remove-alpha"), "0");
-  await T(p, "site-alpha").hover();
-  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="topup-alpha"]').closest(".site-icons")).opacity === "1");
-  assert.equal(await opacity("remove-alpha"), "1");
-  // 登录失效的站点也同样有这两个图标
-  await T(p, "site-beta").hover();
-  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="topup-beta"]').closest(".site-icons")).opacity === "1");
-  assert.equal(await count(p, '[data-testid="remove-beta"]'), 1);
+  // 打开页面时在后台读成本，每读到一个就会重绘一次：等它读完再测悬停，免得节点中途被换掉
+  await p.waitForFunction(() => !document.querySelector('[data-testid="cost-progress"]'));
+  assert.equal(await count(p, ".site-tab .site-icons"), 0, "站点卡上不再有悬停图标");
+  await T(p, "site-alpha").click({ button: "right" });
+  assert.deepEqual(await p.locator('[data-testid="ctx-menu"] button').allTextContents(), ["控制台", "充值", "删除"]);
+  await p.keyboard.press("Escape");
+  assert.equal(await count(p, '[data-testid="ctx-menu"]'), 0, "Esc 关闭");
+  // 登录失效的站点也一样
+  await T(p, "site-beta").click({ button: "right" });
+  assert.equal(await count(p, '[data-testid="ctx-remove"]'), 1);
+  await p.mouse.click(5, 5);
+  assert.equal(await count(p, '[data-testid="ctx-menu"]'), 0, "点别处关闭");
   // 分组行
   const enableOpacity = () => T(p, "enable-alpha-2").evaluate((e) => getComputedStyle(e).opacity);
   await p.mouse.move(2, 2);
@@ -1118,9 +1143,7 @@ test("添加没有对分组分类的站点（new-api）后弹窗说明对体验�
   assert.match(text, /该站点没有对分组分类/);
   assert.match(text, /「beta\.example\.com」/, "说明是哪个站点（添加时用的站点名）");
   assert.match(text, /每一种客户端下都列出来/);
-  assert.match(text, /未对分组分类/);
-  assert.match(text, /用起来会失败/);
-  assert.match(text, /模型.*测速/);
+  assert.doesNotMatch(text, /用起来会失败|卡片上会标注|建议：先看/, "只保留第一条说明");
   assert.equal(await p.evaluate(() => document.activeElement?.getAttribute("data-testid")), "unclassified-ok", "“确定”默认聚焦，回车即可关闭");
   assert.match(await T(p, "toast").textContent(), /已添加站点/, "添加成功的提示仍然在");
   await T(p, "unclassified-ok").click();
@@ -1155,7 +1178,7 @@ test("添加站点对话框：提示里不再有“支持 new-api 和 sub2api”
   await T(p, "empty-sites-add").click();
   await T(p, "add-url").waitFor();
   const text = await p.locator(".modal").innerText();
-  assert.match(text, /填你平时登录的那个中转站网址。/);
+  assert.doesNotMatch(text, /填你平时登录的那个中转站网址/, "这句提示已去掉");
   assert.doesNotMatch(text, /支持 new-api 和 sub2api/);
   const mask = await p.evaluate(() => { const c = getComputedStyle(document.querySelector(".modal-mask")); return { bg: c.backgroundColor, blur: c.backdropFilter || c.webkitBackdropFilter }; });
   const alpha = Number((mask.bg.match(/rgba?\([^)]*?,\s*([\d.]+)\)/) ?? [])[1] ?? 1);
@@ -1167,13 +1190,12 @@ test("添加站点对话框：提示里不再有“支持 new-api 和 sub2api”
 test("站点有模型广场时，刷新就带上各分组的模型：不用测速，模型列和模型筛选立刻可用", async () => {
   const p = await open("sites1,plaza");
   await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await T(p, "row-models-alpha-2").evaluate((e) => e.tagName), "BUTTON", "没测速，模型列也显示模型数量而不是“—”");
-  assert.match(await T(p, "row-models-alpha-2").textContent(), /\d+ 个模型/);
-  await T(p, "row-models-alpha-2").click();
-  await T(p, "drawer-models").waitFor();
-  assert.ok((await count(p, ".model-list li")) >= 1, "抽屉里列出模型");
-  await p.keyboard.press("Escape");
-  await T(p, "cost-drawer").waitFor({ state: "detached" });
+  assert.match(await T(p, "row-models-alpha-2").textContent(), /\d+ 个模型/, "没测速，模型列也显示模型数量而不是“—”");
+  assert.equal(await T(p, "row-models-alpha-2").evaluate((e) => e.tagName), "SPAN", "不是按钮：不用点，悬停就提示");
+  await T(p, "row-models-alpha-2").hover();
+  await p.waitForFunction(() => (document.getElementById("fd-tip")?.textContent ?? "").includes("claude-"));
+  const tip = await p.evaluate(() => document.getElementById("fd-tip").textContent);
+  assert.ok(tip.split("\n").length >= 2 && tip.split("\n").every((l) => l.trim() && !l.includes(" ")), `提示里每行一个模型: ${JSON.stringify(tip)}`);
   assert.equal(await T(p, "model-filter").isDisabled(), false, "模型筛选可用");
   const options = await T(p, "model-filter").locator("option").allTextContents();
   assert.ok(options.includes("claude-sonnet-5-5"), `筛选里有模型: ${options}`);
@@ -1195,18 +1217,8 @@ test("站点有模型广场时，刷新就带上各分组的模型：不用测�
 // ---------- 模型候选项、测速按钮位置、添加站点的进度提示 ----------
 
 /** 当前列表里每个分组行的模型下拉里的模型合起来（去重）——模型筛选的候选项应当恰好等于它。 */
-const listedModels = async (p) => {
-  // 模型列表在抽屉里：逐行点开收集
-  const ids = await p.evaluate(() => [...document.querySelectorAll('[data-testid^="row-models-"]')].map((e) => e.getAttribute("data-testid")));
-  const out = new Set();
-  for (const id of ids) {
-    await T(p, id).click();
-    for (const m of await p.locator(".model-list li").allTextContents()) out.add(m);
-    await p.keyboard.press("Escape");
-    await T(p, "cost-drawer").waitFor({ state: "detached" });
-  }
-  return [...out].sort();
-};
+const listedModels = (p) =>
+  p.evaluate(() => [...new Set([...document.querySelectorAll('[data-testid^="row-models-"]')].flatMap((e) => (e.dataset.tip ?? "").split("\n").filter(Boolean)))].sort());
 const filterOptions = (p) => p.evaluate(() => [...document.querySelector('[data-testid="model-filter"]').options].map((o) => o.value).filter(Boolean));
 
 test("模型下拉的候选项恰好是当前列出的分组的模型（去重），不出现无关的模型；换站点筛选时跟着变", async () => {
@@ -1221,12 +1233,13 @@ test("模型下拉的候选项恰好是当前列出的分组的模型（去重�
   };
   const all = await check("全部站点");
   assert.ok(all.includes("beta-only-model") && all.includes("claude-opus-5-5"));
-  await T(p, "site-filter").selectOption("beta");
+  await T(p, "site-name-beta").click();
   assert.deepEqual(await check("只看 Beta"), ["beta-only-model", "claude-sonnet-5-5"], "Beta 的分组只有这两个模型，Alpha 的模型不该出现");
-  await T(p, "site-filter").selectOption("alpha");
+  await T(p, "site-name-alpha").click();
   const alpha = await check("只看 Alpha");
   assert.ok(!alpha.includes("beta-only-model"), "Beta 独有的模型不该出现在 Alpha 的候选项里");
-  await T(p, "site-filter").selectOption("all");
+  await p.mouse.move(0, 0);
+  await T(p, "site-tab-all").click();
   await T(p, "client-codex").click();
   await check("Codex 标签");
   await done(p);
@@ -1237,7 +1250,7 @@ test("选中的模型换了站点筛选后不在候选项里：筛选条件一�
   await T(p, "group-card-alpha-2").waitFor();
   await T(p, "model-filter").selectOption("claude-opus-5-5"); // Alpha 独有
   assert.equal(await count(p, '[data-testid^="group-card-beta-"]'), 0, "Beta 没有这个模型，被筛掉");
-  await T(p, "site-filter").selectOption("beta");
+  await T(p, "site-name-beta").click();
   assert.equal(await T(p, "model-filter").inputValue(), "", "下拉框回到“模型”");
   assert.ok((await count(p, '[data-testid^="group-card-beta-"]')) >= 1, "Beta 的分组还在列表里，没有被残留的筛选过滤掉");
   assert.equal(await count(p, '[data-testid="empty-client"]'), 0);
@@ -1255,12 +1268,12 @@ test("添加站点后用提示条说明进度：开始刷新分组 → 开始刷
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
   });
   await addSite(p, "beta.example.com");
-  await p.waitForFunction(() => window.__toasts.some((t) => /分组和模型已刷新/.test(t)));
+  await p.waitForFunction(() => window.__toasts.some((t) => /分组、模型和成本都已读取/.test(t)));
   const seq = await p.evaluate(() => window.__toasts);
   const at = (re) => seq.findIndex((t) => re.test(t));
   assert.ok(at(/开始刷新分组/) >= 0, `缺少“开始刷新分组”: ${seq}`);
   assert.ok(at(/开始刷新模型列表/) > at(/开始刷新分组/), `“开始刷新模型列表”要在“开始刷新分组”之后: ${seq}`);
-  assert.ok(at(/已添加站点「beta\.example\.com」，分组和模型已刷新/) > at(/开始刷新模型列表/), `最后是完成提示: ${seq}`);
+  assert.ok(at(/已添加站点「beta\.example\.com」，分组、模型和成本都已读取/) > at(/开始刷新模型列表/), `最后是完成提示: ${seq}`);
   await done(p);
 });
 
@@ -1277,7 +1290,7 @@ test("点 Token成本 的数字，右侧抽屉滑出并展示成本、缓存命�
   assert.equal(await count(p, '[data-testid="model-table"] tbody tr'), 2);
   assert.equal(await count(p, '[data-testid="estimate-table"] tbody tr'), 1);
   const box = await p.locator(".drawer").boundingBox();
-  assert.ok(box && Math.abs(box.x + box.width - 960) < 2, "抽屉贴在窗口右侧");
+  assert.ok(box && Math.abs(box.x + box.width - 1100) < 2, "抽屉贴在窗口右侧");
   await done(p);
 });
 
@@ -1311,7 +1324,7 @@ test("成本抽屉：Esc、关闭按钮、点遮罩都能关；没有用量时�
   // 读取失败：列表里没有数字，列表的“—”点不开；抽屉的失败状态由重新取数覆盖
   const q = await open("sites1,usagefail");
   await T(q, "group-card-alpha-2").waitFor();
-  assert.equal(await T(q, "cost-val-alpha-2").textContent(), "—");
+  await q.waitForFunction(() => document.querySelector('[data-testid="cost-val-alpha-2"]')?.textContent === "—");
   await done(q);
 });
 
@@ -1369,7 +1382,10 @@ test("刷新时一并读取成本：手动刷新全部重读，自动刷新只�
   await p.waitForTimeout(800);
   assert.equal(await p.evaluate(() => window.__usageCalls.length), first, "自动刷新不重复读取");
   await T(p, "refresh").click();
-  await p.waitForFunction((n) => window.__usageCalls.length >= n * 2, first);
+  const listed = await cards(p);
+  await p.waitForFunction(([n, k]) => window.__usageCalls.length >= n + k, [first, listed]);
+  await p.waitForTimeout(500);
+  assert.ok((await p.evaluate(() => window.__usageCalls.length)) < first * 2, "手动刷新只重读当前列出的分组，不是所有站点的所有分组");
   await done(p);
 });
 
@@ -1395,14 +1411,1001 @@ test("测速按钮在标题栏（刷新时间右边），不在列表标题行�
 test("缓存命中率列：来自同步到的用量数据，标题提示口径，可排序，没有数据显示 —", async () => {
   const p = await open("sites1");
   await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await T(p, "cache-val-alpha-2").textContent(), "—", "还没同步到就是 —");
-  await p.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.textContent === "32.0%" && ![...document.querySelectorAll('[data-testid^="cache-val-"]')].some((e) => e.textContent === "—" && e.closest(".card").querySelector('[data-testid^="cost-val-"]').textContent !== "无用量"));
+  assert.match(await T(p, "cache-val-alpha-2").textContent(), /^(—|读取中…)$/, "还没同步到：读取中或 —");
+  await p.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.textContent === "32.0%" && ![...document.querySelectorAll('[data-testid^="cache-val-"]')].some((e) => ["—", "读取中…"].includes(e.textContent) && e.closest(".card").querySelector('[data-testid^="cost-val-"]').textContent !== "无用量"));
   await T(p, "sort-cache").hover();
   await p.waitForFunction(() => /缓存读取/.test(document.getElementById("fd-tip")?.textContent ?? ""));
   await T(p, "sort-cache").click();
   const vals = await p.evaluate(() => [...document.querySelectorAll('[data-testid^="cache-val-"]')].map((e) => e.textContent));
   const nums = vals.filter((v) => v.endsWith("%")).map(parseFloat);
   assert.deepEqual(nums, [...nums].sort((a, b) => a - b), "升序");
-  assert.equal(vals.at(-1), "—", "没有数据的排最后");
+  assert.match(vals.at(-1), /^(—|无有效统计)$/, "没有数据的排最后");
+  await done(p);
+});
+
+test("分组备注不再占位：行里不显示，鼠标放到分组名称上才提示", async () => {
+  const p = await open("sites1");
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.equal(await count(p, ".card .desc"), 0, "行里没有备注文字");
+  const withDesc = await p.evaluate(() => [...document.querySelectorAll('[data-testid^="name-"]')].find((e) => e.dataset.tip)?.getAttribute("data-testid"));
+  assert.ok(withDesc, "有备注的分组名称带提示");
+  await T(p, withDesc).hover();
+  await p.waitForFunction(() => (document.getElementById("fd-tip")?.textContent ?? "").length > 0);
+  await done(p);
+});
+
+test("列表 UI 规范：数据列等宽并居中，倍率 / Token成本 / 缓存命中率 / 模型数量是同样高度和字号的药丸，间距统一", async () => {
+  const p = await open("sites1,realfrt,plaza");
+  await p.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.classList.contains("pill"));
+  const m = await p.evaluate(() => {
+    const row = document.querySelector('[data-testid="group-card-alpha-2"]');
+    const box = (s) => { const e = row.querySelector(s); const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return { w: Math.round(r.width), h: Math.round(r.height), fs: cs.fontSize, fw: cs.fontWeight, color: cs.color, cx: Math.round(r.left + r.width / 2) }; };
+    const cols = [".cell-speed", ".cell-rate", ".cell-cost", ".cell-cache"].map((c) => box(c).w);
+    const pills = [".rate", '[data-testid^="cost-val-"]', '[data-testid^="cache-val-"]', '[data-testid^="row-models-"]'].map(box);
+    const head = document.querySelector('[data-testid="list-head"]');
+    const headCx = [".cell-speed", ".cell-rate", ".cell-cost", ".cell-cache"].map((c) => { const r = head.querySelector(c + " button").getBoundingClientRect(); return Math.round(r.left + r.width / 2); });
+    const rowCx = [".cell-speed", ".cell-rate", ".cell-cost", ".cell-cache"].map((c) => box(c).cx);
+    return { cols, pills, headCx, rowCx };
+  });
+  assert.equal(new Set(m.cols).size, 1, `四个数据列等宽: ${m.cols}`);
+  for (const k of ["h", "fs", "fw", "color"]) assert.equal(new Set(m.pills.map((x) => x[k])).size, 1, `药丸的 ${k} 一致: ${JSON.stringify(m.pills)}`);
+  m.headCx.forEach((x, i) => assert.ok(Math.abs(x - m.rowCx[i]) <= 1, `第 ${i} 列标题和内容居中对齐: ${m.headCx} / ${m.rowCx}`));
+  await done(p);
+});
+
+test("读取成本时顶栏有进度，没读到的格子显示“读取中…”，读完消失", async () => {
+  const p = await open("sites1,slow");
+  await T(p, "cost-progress").waitFor();
+  assert.match(await T(p, "cost-progress").textContent(), /读取成本 \d+\/\d+/);
+  assert.match(await T(p, "cost-val-alpha-2").textContent(), /^(读取中…|\$)/);
+  await T(p, "cost-progress").waitFor({ state: "detached", timeout: 60000 });
+  await done(p);
+});
+
+test("左侧是站点列表（名称 + 余额），客户端 tab 在内容区顶部；悬停出现打开 / 充值 / 移除，点击切换筛选", async () => {
+  const p = await open("sites2");
+  await T(p, "group-card-alpha-2").waitFor();
+  const titles = await p.locator(".sidebar .side-title").allTextContents();
+  assert.deepEqual(titles, ["上游站点"], "左侧只有“上游站点”（没有管理员站点时没有“我的中转站”）");
+  assert.equal(await count(p, ".sidebar [data-testid^='client-']"), 0, "客户端不在左侧");
+  assert.equal(await p.evaluate(() => !!document.querySelector('.sidebar [data-testid="site-tabs"] [data-testid="site-alpha"]')), true, "站点在左侧");
+  assert.equal(await p.evaluate(() => document.querySelectorAll('.content [data-testid="client-tabs"] [data-testid^="client-"]').length > 0 && !document.querySelector('.content [data-testid="site-tabs"]')), true, "客户端 tab 在右侧内容区顶部");
+  assert.deepEqual(await p.locator('[data-testid="client-tabs"] .side-name').allTextContents(), ["Claude Code", "Claude Desktop", "Codex", "Gemini CLI"]);
+  assert.equal(await count(p, '[data-testid^="site-account-"]'), 0, "不显示用户名");
+  assert.equal(await T(p, "site-balance-alpha").textContent(), "$99.78");
+  assert.deepEqual(await p.locator('[data-testid="site-tabs"] .site-tab').evaluateAll((es) => es.map((e) => e.querySelector(".tab-name")?.textContent ?? "+")), ["全部站点", "Alpha", "Beta", "+"]);
+  assert.match(await T(p, "site-tab-all").getAttribute("class"), /\bon\b/);
+  await T(p, "site-name-beta").click();
+  assert.match(await T(p, "site-beta").getAttribute("class"), /\bon\b/);
+  assert.equal(await cards(p), 1);
+  await T(p, "site-alpha").click({ button: "right" });
+  await T(p, "ctx-remove").click();
+  await T(p, "remove-dialog").waitFor();
+  assert.match(await T(p, "site-beta").getAttribute("class"), /\bon\b/, "右键不触发切换");
+  await done(p);
+});
+
+test("分组列表五列是同一种药丸样式：首字时延、倍率、Token成本、缓存命中率、模型数量", async () => {
+  const p = await open("sites1,realfrt,plaza");
+  await p.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.classList.contains("pill") && document.querySelector('[data-testid="speed-alpha-2"]'));
+  const m = await p.evaluate(() => {
+    const row = document.querySelector('[data-testid="group-card-alpha-2"]');
+    return ['[data-testid^="speed-"]', ".rate", '[data-testid^="cost-val-"]', '[data-testid^="cache-val-"]', '[data-testid^="row-models-"]'].map((s) => { const e = row.querySelector(s); const cs = getComputedStyle(e); return [cs.height, cs.fontSize, cs.fontWeight, cs.color, cs.backgroundColor, cs.borderRadius].join("|"); });
+  });
+  assert.equal(new Set(m).size, 1, `五列的高度/字号/字重/颜色/底色/圆角一致: ${JSON.stringify(m)}`);
+  await done(p);
+});
+
+test("缓存命中率：近 7 天调用少于 100 次显示“无有效统计”，提示里说明原因；标题提示补充了说明", async () => {
+  const p = await open("sites1,fewcalls");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.textContent === "无有效统计");
+  assert.equal(await count(p, '[data-testid^="cache-val-"].pill'), 0, "没有任何一行展示不准的百分比");
+  await T(p, "cache-val-alpha-2").hover();
+  await p.waitForFunction(() => /如果调用量少于100次，效果不准确，则不展示/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  await T(p, "sort-cache").hover();
+  await p.waitForFunction(() => /缓存读取 ÷.*点击排序；如果调用量少于100次，效果不准确，则不展示/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  await done(p);
+
+  // 调用量够了：照常展示，并且单元格的提示里也有这句补充
+  const q = await open("sites1");
+  await q.waitForFunction(() => document.querySelector('[data-testid="cache-val-alpha-2"]')?.textContent === "32.0%");
+  await T(q, "cache-val-alpha-2").hover();
+  await q.waitForFunction(() => /如果调用量少于100次/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  await done(q);
+});
+
+test("登录页：只写“所有数据保存在本地”；勾选“我是该站点管理员”先弹说明，确认后才勾上并随登录提交", async () => {
+  const p = await open("sites1");
+  await T(p, "group-card-alpha-2").waitFor();
+  await T(p, "add-site").click();
+  await T(p, "add-url").fill("beta.example.com");
+  await T(p, "add-submit").click();
+  await T(p, "add-username").waitFor();
+  const text = await T(p, "add-dialog").textContent();
+  assert.ok(text.includes("所有数据保存在本地"), "有“所有数据保存在本地”");
+  assert.ok(!text.includes("密码只用于登录"), "旧的长说明已去掉");
+  assert.equal(await T(p, "add-admin").isChecked(), false, "默认不勾选");
+  // 勾选 → 弹说明；取消 → 仍是未勾选
+  await T(p, "add-admin").click({ force: true });
+  await T(p, "admin-notice").waitFor();
+  assert.match(await T(p, "admin-notice").textContent(), /该模式支持监控上下游可用性及成本变化，务必在站点中再次添加使用到的上游站点账号/);
+  await T(p, "admin-notice-cancel").click();
+  await T(p, "admin-notice").waitFor({ state: "detached" });
+  assert.equal(await T(p, "add-admin").isChecked(), false);
+  // 再勾选 → 我知道了 → 勾上
+  await T(p, "add-admin").click({ force: true });
+  await T(p, "admin-notice-ok").click();
+  await T(p, "admin-notice").waitFor({ state: "detached" });
+  assert.equal(await T(p, "add-admin").isChecked(), true);
+  await T(p, "add-username").fill("me@example.com");
+  await T(p, "add-password").fill("ok123");
+  await T(p, "add-submit").click();
+  await p.waitForFunction(() => window.__addArgs?.length > 0);
+  assert.equal(await p.evaluate(() => window.__addArgs.at(-1).isAdmin), true, "管理员身份随登录提交");
+  await done(p);
+});
+
+// ---------- 我的中转站（站长：上下游一体管理）----------
+
+const opsLog = (p) => p.evaluate(() => window.__adminOps ?? []);
+
+test("没有管理员站点时没有“我的中转站”；有时出现在客户端和站点之间，点卡片进入视图：每个下游分组一个色块，缩进的是来源上游", async () => {
+  const p0 = await open("sites1");
+  await T(p0, "group-card-alpha-2").waitFor();
+  assert.equal(await count(p0, '[data-testid^="operator-"]'), 0, "普通站点不显示");
+  await done(p0);
+
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").waitFor();
+  const order = await p.evaluate(() => { const t = [...document.querySelectorAll(".sidebar .side-title")].map((e) => e.textContent); const y = (s) => document.querySelector(s).getBoundingClientRect().top; return { t, op: y('[data-testid="operator-alpha"]'), site: y('[data-testid="site-tabs"]') }; });
+  assert.deepEqual(order.t, ["我的中转站", "上游站点"]);
+  assert.ok(order.op < order.site, "“我的中转站”在“上游站点”上面，两种站点都在左侧");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-list").waitFor();
+  assert.equal(await count(p, '[data-testid^="down-block-"]'), 4, "每个下游分组一个色块");
+  assert.equal(await T(p, "up-status-u1").first().textContent(), "运行中");
+  assert.equal(await T(p, "up-status-u2").first().textContent(), "已暂停");
+  assert.equal(await T(p, "up-status-u3").textContent(), "异常");
+  // 色块里：先是下游分组，下面缩进的是它来源的上游；同一个上游服务多个分组时在每个色块里各出现一次
+  assert.equal(await count(p, '[data-testid="down-block-4"] .up-row'), 2, "分组 4 来自 u1、u2");
+  assert.equal(await count(p, '[data-testid="down-block-12"] .up-row'), 2, "分组 12 来自 u2、u3");
+  assert.equal(await count(p, '[data-testid="down-block-2"] .up-row'), 1);
+  assert.equal(await count(p, '[data-testid="down-block-99"] .up-row'), 0, "没有上游的分组");
+  assert.match(await T(p, "down-block-99").textContent(), /没有来源的上游/);
+  assert.equal(await count(p, '[data-testid="up-u1"]'), 2, "u1 同时服务分组 2 和 4，出现两次");
+  const first = await p.evaluate(() => document.querySelector('[data-testid="down-block-4"]').firstElementChild.className.includes("down-row"));
+  assert.equal(first, true, "下游分组在色块最上面");
+  const indent = await p.evaluate(() => { const d = document.querySelector('[data-testid="down-block-4"] .down-row').getBoundingClientRect().left; const u = document.querySelector('[data-testid="down-block-4"] .up-row').getBoundingClientRect().left; return u - d; });
+  assert.ok(indent >= 12, `上游缩进在下游下面: ${indent}`);
+  const hues = await p.evaluate(() => [...document.querySelectorAll('[data-testid^="down-block-"]')].map((e) => e.style.getPropertyValue("--h")));
+  assert.equal(new Set(hues).size, hues.length, `每个色块颜色不同: ${hues}`);
+  // 列定义不变：同样的列标题
+  const heads = await p.locator('[data-testid="op-list-head"] .col-head').allTextContents();
+  assert.deepEqual(heads, ["下游分组 / 来源上游", "首字时延", "倍率", "平均成本", "缓存命中率", "24h流水", "模型"]);
+  // 没有启动按钮
+  assert.equal(await count(p, ".enable-btn"), 0);
+  // 切回客户端
+  // 点左侧上游站点的卡片：回到普通分组列表（并且中转站管理视图里没有客户端 tab）
+  assert.equal(await count(p, '[data-testid="client-tabs"]'), 0, "中转站管理视图里不显示客户端 tab");
+  await T(p, "site-name-alpha").click();
+  await T(p, "group-list").waitFor();
+  await done(p);
+});
+
+test("上游行悬停出现编辑 / 移除（编辑在原来暂停的位置，没有暂停按钮）；下游行悬停出现编辑；平时隐藏", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-block-2").waitFor();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]')); // 读用量时每读到一个就重绘，节点会被换掉：等它读完
+  const op = (id) => T(p, id).first().evaluate((e) => getComputedStyle(e).opacity);
+  assert.equal(await op("up-edit-u1"), "0");
+  assert.equal(await count(p, '[data-testid^="up-pause-"], [data-testid^="up-resume-"]'), 0, "没有暂停 / 恢复按钮");
+  assert.equal(await T(p, "down-edit-4").first().evaluate((e) => getComputedStyle(e).opacity), "0");
+  await T(p, "down-block-2").locator('[data-testid="up-u1"]').hover();
+  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="down-block-2"] [data-testid="up-edit-u1"]')).opacity === "1");
+  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="down-block-2"] [data-testid="up-remove-u1"]')).opacity === "1");
+  await T(p, "down-block-4").locator('[data-testid="down-4"]').hover();
+  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="down-block-4"] [data-testid="down-edit-4"]')).opacity === "1");
+  await done(p);
+});
+
+test("移除上游：弹窗列出受影响的下游，不再要输入名称，直接确认；确认后它的色块消失", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-remove-u3").click({ force: true });
+  await T(p, "up-remove-dialog").waitFor();
+  assert.equal(await count(p, '[data-testid="up-typed"]'), 0, "没有“输入上游名称”的输入框");
+  assert.match(await T(p, "up-remove-dialog").textContent(), /它服务的 \d+ 个下游分组/);
+  assert.equal(await T(p, "up-confirm").isDisabled(), false, "可以直接确认");
+  await T(p, "up-confirm").click();
+  await T(p, "up-u3").waitFor({ state: "detached" });
+  assert.deepEqual(await opsLog(p), ["remove:u3"]);
+  await done(p);
+});
+
+test("编辑下游分组：两步确认，变更清单里写明涨价 / 降价；没改动或倍率非法不能提交", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-edit-4").click({ force: true });
+  await T(p, "group-edit-dialog").waitFor();
+  assert.equal(await T(p, "ge-name").inputValue(), "Claude 逆向Kiro");
+  assert.equal(await T(p, "ge-rate").inputValue(), "0.28");
+  assert.equal(await count(p, '[data-testid="ge-platform"]'), 1, "sub2api 有分类");
+  // 没改任何东西
+  await T(p, "ge-submit").click();
+  assert.match(await T(p, "ge-error").textContent(), /没有修改任何内容/);
+  // 倍率非法
+  await T(p, "ge-rate").fill("abc");
+  await T(p, "ge-submit").click();
+  assert.match(await T(p, "ge-error").textContent(), /倍率必须是大于 0 的数字/);
+  // 降价
+  await T(p, "ge-rate").fill("0.14");
+  await T(p, "ge-desc").fill("新的备注");
+  await T(p, "ge-submit").click();
+  const sum = await T(p, "ge-summary").textContent();
+  assert.match(sum, /倍率：×0\.28 → ×0\.14（降价 50%/);
+  assert.match(sum, /备注：性价比高，适合日常编码 → 新的备注/);
+  assert.deepEqual(await opsLog(p), [], "确认前不会发请求");
+  await T(p, "ge-back").click();
+  assert.equal(await T(p, "ge-rate").inputValue(), "0.14", "返回后保留已填内容");
+  await T(p, "ge-submit").click();
+  await T(p, "ge-submit").click();
+  await T(p, "group-edit-dialog").waitFor({ state: "detached" });
+  const ops = await opsLog(p);
+  assert.equal(ops.length, 1);
+  assert.deepEqual(JSON.parse(ops[0].replace(/^edit:4:/, "")), { description: "新的备注", rate_multiplier: 0.14 }, "只提交改过的字段");
+  await p.waitForFunction(() => document.querySelector('[data-testid="group-rate-4"]')?.textContent === "×0.14"); // 保存后重新读取站点数据
+  await done(p);
+});
+
+test("编辑分组：涨价有提醒；站点拒绝时错误留在弹窗里可修改重试", async () => {
+  const p = await open("sites1,admin,adminedit-fail");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-edit-2").click({ force: true });
+  await T(p, "ge-rate").fill("5");
+  await T(p, "ge-submit").click();
+  assert.match(await T(p, "ge-summary").textContent(), /涨价 100%，之后立刻按新价扣用户的钱/);
+  await T(p, "ge-submit").click();
+  await p.waitForFunction(() => /站点拒绝了这次修改/.test(document.querySelector('[data-testid="ge-error"]')?.textContent ?? ""));
+  assert.equal(await count(p, '[data-testid="group-edit-dialog"]'), 1, "弹窗还在");
+  assert.deepEqual(await opsLog(p), []);
+  await done(p);
+});
+
+test("new-api 站点的分组编辑：名称不能改，没有分类；读取失败有重试", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-beta").click();
+  await T(p, "down-edit-GPT Pro").click({ force: true });
+  await T(p, "group-edit-dialog").waitFor();
+  assert.equal(await T(p, "ge-name").isDisabled(), true);
+  assert.equal(await count(p, '[data-testid="ge-platform"]'), 0);
+  await done(p);
+
+  const q = await open("sites1,admin,adminfail");
+  await T(q, "operator-alpha").click();
+  assert.match(await T(q, "op-error").textContent(), /读取失败：站点限流了/);
+  await done(q);
+});
+
+test("站长视角：上游行只显示名称、状态和站点，不显示客户端类型和“服务几个分组”", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-u1").first().waitFor();
+  const row = T(p, "down-block-2").locator('[data-testid="up-u1"]');
+  const text = await row.locator(".card-main").textContent();
+  assert.ok(text.includes("官方账号池") && text.includes("运行中"), text);
+  assert.ok(!text.includes("api.up-one.com"), "站点名称不再显示在账号旁边");
+  assert.ok(!text.includes("anthropic"), "不显示客户端类型");
+  assert.ok(!/服务\s*\d+\s*个/.test(text), "不显示“服务 N 个下游分组”");
+  assert.equal(await row.locator(".card-main .site-tag").count(), 0, "没有站点标签");
+  // 名称右边是一个“编辑”图标，鼠标放上去能看到它现在用的是哪个站点的 Key
+  assert.equal(await row.locator('[data-testid="up-edit-u1"]').count(), 1);
+  assert.match(await row.locator('[data-testid="up-edit-u1"]').getAttribute("data-tip"), /现在用的是 api\.up-one\.com 的 Key/, "提示里写明它现在用的是哪个站点的 Key");
+  await done(p);
+});
+
+test("站长视角：上游和下游行都显示首字时延 / 倍率 / Token成本 / 缓存命中率 / 模型；读取时有进度和“读取中…”", async () => {
+  const p = await open("sites1,admin,slow");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-progress").waitFor();
+  assert.match(await T(p, "op-progress").textContent(), /读取用量 \d+\/\d+/);
+  assert.equal(await count(p, '[data-testid="op-reload"]'), 0, "没有单独的“重新读取”，统一用顶部刷新");
+  assert.match(await T(p, "group-cost-2").or(T(p, "group-cost-2")).first().textContent(), /读取中…|\$/);
+  await T(p, "op-progress").waitFor({ state: "detached", timeout: 60000 });
+  // 下游分组 2：用户实付口径
+  assert.equal(await T(p, "group-speed-2").textContent(), "0.90s");
+  assert.equal(await T(p, "group-cost-2").textContent(), "$2.50");
+  assert.equal(await T(p, "group-cache-2").textContent(), "33.0%");
+  assert.equal(await T(p, "group-models-2").textContent(), "3 个模型", "下游的模型 = 来源上游支持的模型并集");
+  // 上游 u1：成本口径是付给上游的（mock 里 1.5），倍率是账号倍率
+  assert.equal(await T(p, "account-speed-u1").first().textContent(), "0.70s");
+  assert.equal(await T(p, "account-cost-u1").first().textContent(), "未关联", "没关联上游分组就没有真实账单，不估算");
+  assert.equal(await T(p, "account-rate-u1").first().textContent(), "×0.09?", "未关联：按名称推荐的分组倍率");
+  assert.equal(await T(p, "account-cache-u1").first().textContent(), "33.0%");
+  assert.equal(await T(p, "account-models-u1").first().textContent(), "3 个模型");
+  // 没用量的上游：无用量；调用少于 100 次的分组：缓存无有效统计
+  assert.equal(await T(p, "account-cost-u3").textContent(), "未关联");
+  assert.equal(await T(p, "group-cache-12").textContent(), "无有效统计");
+  assert.equal(await T(p, "group-cost-99").textContent(), "无用量");
+  await done(p);
+});
+
+test("站长视角：10 分钟内读过的用量不重复请求，点重新读取全部重读；读取失败时提示", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await p.waitForFunction(() => document.querySelector('[data-testid="group-cost-2"]')?.textContent === "$2.50");
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  const first = await p.evaluate(() => window.__adminUsageCalls.length);
+  assert.equal(first, 7, "4 个下游分组 + 3 个上游账号");
+  await T(p, "site-name-alpha").click();
+  await T(p, "operator-alpha").click();
+  await p.waitForTimeout(600);
+  assert.equal(await p.evaluate(() => window.__adminUsageCalls.length), first, "没过期就不重复读");
+  await T(p, "refresh").click();
+  await p.waitForFunction((n) => window.__adminUsageCalls.length >= n * 2, first);
+  await done(p);
+  const q = await open("sites1,admin,adminusage-fail");
+  await T(q, "operator-alpha").click();
+  await T(q, "toast").waitFor();
+  assert.match(await T(q, "toast").textContent(), /部分用量没有读到：站点限流了/);
+  await done(q);
+});
+
+test("站长视角：去掉说明文字；按客户端分 tab，每个 tab 旁边一个点（红点 + 有问题的分组数，没问题是绿点）", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-tabs").waitFor();
+  const page = await T(p, "op-list").evaluate(() => document.querySelector(".content").textContent);
+  assert.ok(!page.includes("每个色块是一个下游分组"), "说明文字去掉了");
+  assert.ok(!/个上游账号 · \d+ 个下游分组/.test(page), "汇总行去掉了");
+  assert.deepEqual(await p.locator(".op-tab").evaluateAll((es) => es.map((e) => e.firstChild.textContent)), ["全部", "Claude", "OpenAI"]);
+  // 分组 12 没有运行中的上游（一个暂停、一个异常），分组 99 没有上游 → 各算一个问题
+  assert.equal(await T(p, "op-n-all").textContent(), "2");
+  assert.equal(await T(p, "op-n-anthropic").textContent(), "1");
+  assert.equal(await T(p, "op-n-openai").textContent(), "1");
+  assert.equal(await T(p, "op-dot-all").getAttribute("class"), "tab-dot bad");
+  await T(p, "op-dot-anthropic").hover();
+  await p.waitForFunction(() => /1 个分组有问题[\s\S]*Claude 逆向Kiro - 特价 —— 没有运行中的上游/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  // 切 tab：只显示这个客户端的分组
+  await T(p, "op-tab-openai").click();
+  assert.equal(await count(p, '[data-testid^="down-block-"]'), 1);
+  assert.equal(await count(p, '[data-testid="down-block-99"]'), 1);
+  await T(p, "op-tab-anthropic").click();
+  assert.equal(await count(p, '[data-testid^="down-block-"]'), 3);
+  // 恢复暂停的 u2 后，分组 12 有运行中的上游了，但还有一个异常的上游 u3：仍是问题，原因变成“上游异常”
+  await T(p, "up-edit-u2").first().click({ force: true });
+  await T(p, "au-nav-state").click();
+  await T(p, "st-sched-on").click();
+  await p.waitForFunction(() => /这个上游能被用户调用到/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  await T(p, "st-close").click();
+  await p.waitForFunction(() => [...document.querySelectorAll('[data-testid="up-status-u2"]')].every((e) => e.textContent === "运行中"));
+  assert.equal(await T(p, "op-n-anthropic").textContent(), "1");
+  await T(p, "op-dot-anthropic").hover();
+  await p.waitForFunction(() => /上游「异常账号」异常/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  // 把异常的上游移除后，Claude 下没有问题了：绿点，数字消失
+  await T(p, "up-remove-u3").click({ force: true });
+  await T(p, "up-confirm").click();
+  await p.waitForFunction(() => document.querySelector('[data-testid="op-n-anthropic"]') === null);
+  assert.equal(await T(p, "op-dot-anthropic").getAttribute("class"), "tab-dot ok");
+  assert.equal(await T(p, "op-n-all").textContent(), "1", "全部里还剩没有上游的分组 99");
+  await done(p);
+});
+
+test("站长视角：分组和上游行都有“24h流水”列：下游 +收入，上游 -成本；翻满记录的显示 ≥；左侧不再有“上游站点”区域", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await p.waitForFunction(() => /^\+/.test(document.querySelector('[data-testid="group-tokens-2"]')?.textContent ?? ""));
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  console.log("FLOW", await T(p, "group-tokens-2").textContent(), await T(p, "group-tokens-4").textContent(), await T(p, "account-tokens-u1").first().textContent());
+  assert.match(await T(p, "group-tokens-4").textContent(), /^\+≥/, "只统计了一部分");
+  assert.equal(await T(p, "account-tokens-u1").first().textContent(), "未关联", "上游成本只读真实账单：没关联上游分组就没有");
+  await T(p, "group-tokens-2").hover();
+  await p.waitForFunction(() => /过去 24 小时用户为这个分组支付的钱.*Token 25\.90M/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  await done(p);
+});
+
+test("站长视角：没添加账号的上游站点在顶部提示，点“添加”打开添加站点并填好地址", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-missing").waitFor();
+  assert.match(await T(p, "op-missing").textContent(), /这些上游站点还没有添加你的账号：.*api\.up-two\.com/);
+  await T(p, "op-add-api.up-two.com").click();
+  await T(p, "add-dialog").waitFor();
+  assert.equal(await T(p, "add-url").inputValue(), "api.up-two.com", "地址已填好");
+  await done(p).catch(() => {});
+  const q = await open("sites1,admin,alllinked");
+  await T(q, "operator-alpha").click();
+  await T(q, "account-rate-u1").first().waitFor();
+  assert.equal(await count(q, '[data-testid="op-missing"]'), 0, "都添加过了就不提示");
+  await done(q);
+});
+
+test("站长视角：上游账号关联到上游站点的分组后，倍率读那个分组当前的倍率，成本按真实倍率算；可更换、取消", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "account-rate-u1").first().waitFor();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  // u1：名称“官方账号池 0.09”，上游站点里恰好有一个倍率 0.09 的分组 → 推荐（虚线 + 问号），成本先按官方价口径
+  assert.equal(await T(p, "account-rate-u1").first().textContent(), "×0.09?");
+  assert.match(await T(p, "account-rate-u1").first().getAttribute("class"), /hint/);
+  assert.equal(await T(p, "account-cost-u1").first().textContent(), "未关联");
+  // u2：名称里的 0.35 在上游站点没有对应分组 → 没推荐，显示“关联”
+  assert.equal(await T(p, "account-rate-u2").first().textContent(), "关联");
+  // 点“×0.09?”：不再有单独的关联弹窗，打开编辑（更换来源）弹窗，默认选中推荐的分组
+  await T(p, "account-rate-u1").first().click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.equal(await count(p, '[data-testid="link-dialog"]'), 0);
+  assert.equal(await T(p, "au-site").inputValue(), "beta", "上游站点是已登录的 Beta");
+  await T(p, "au-group").selectOption("Claude 逆向Kiro");
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  await T(p, "au-done").click();
+  await p.waitForFunction(() => document.querySelector('[data-testid="account-rate-u1"]')?.textContent === "×0.3");
+  assert.match(await T(p, "account-rate-u1").first().getAttribute("class"), /linked/);
+  assert.match((await opsLog(p)).at(-1), /^replace:u1:beta:Claude 逆向Kiro:/);
+  // 成本 = 上游站点自己记的真实账单（mock 里这个分组每百万 $2.00，24 小时扣 $3.00），不是估算
+  await p.waitForFunction(() => document.querySelector('[data-testid="account-cost-u1"]')?.textContent === "$2.00");
+  assert.equal(await T(p, "account-tokens-u1").first().textContent(), "-$3.00");
+  await T(p, "account-cost-u1").first().hover();
+  await p.waitForFunction(() => /真实账单.*实际被扣的钱.*不是估算/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  // 已经关联好的倍率：点击没有任何反应
+  const nOps = (await opsLog(p)).length;
+  await T(p, "account-rate-u1").first().click();
+  assert.equal(await count(p, '[data-testid="add-upstream-dialog"]'), 0, "已关联的倍率不可点");
+  assert.equal((await opsLog(p)).length, nOps);
+  assert.equal(await T(p, "account-rate-u1").first().evaluate((e) => e.tagName), "SPAN");
+  // u2（没有推荐，显示“关联”）：同样打开编辑弹窗，选“正价”
+  await linkVia(p, "u2", { site: "beta", group: "Claude 逆向Kiro" });
+  await p.waitForFunction(() => document.querySelector('[data-testid="account-rate-u2"]')?.textContent === "×0.3");
+  await done(p);
+});
+
+test("管理的中转站卡片：右键只有“控制台、删除”", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click({ button: "right" });
+  assert.deepEqual(await p.locator('[data-testid="ctx-menu"] button').allTextContents(), ["控制台", "删除"]);
+  await T(p, "ctx-console").click();
+  await p.waitForFunction(() => (window.__opened ?? []).length === 1);
+  await T(p, "operator-alpha").click({ button: "right" });
+  await T(p, "ctx-remove").click();
+  await T(p, "remove-dialog").waitFor();
+  await done(p);
+});
+
+test("站点 tab：点站点名称只切换筛选，不打开网页；右键“控制台”才打开站点控制台", async () => {
+  const p = await open("sites2");
+  await T(p, "group-card-alpha-2").waitFor();
+  await T(p, "site-name-beta").click();
+  assert.deepEqual(await p.evaluate(() => window.__opened ?? []), [], "点站点名称不打开网页");
+  assert.match(await T(p, "site-beta").getAttribute("class"), /\bon\b/, "只是切换了筛选");
+  await ctx(p, "site-alpha", "console");
+  await p.waitForFunction(() => (window.__opened ?? []).length === 1);
+  await ctx(p, "site-beta", "console");
+  await p.waitForFunction(() => (window.__opened ?? []).length === 2);
+  assert.deepEqual(await p.evaluate(() => window.__opened), ["https://alpha.example.com", "https://beta.example.com/console"]);
+  assert.match(await T(p, "site-beta").getAttribute("class"), /\bon\b/, "右键不触发切换");
+  await done(p);
+});
+
+test("站长：给下游分组添加上游——选上游站点和分组，预览步骤，创建后显示结果，可以启用；新上游出现在色块里", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-addup-4").waitFor();
+  await T(p, "down-addup-4").click({ force: true });
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "add-upstream-dialog").textContent(), /给「Claude 逆向Kiro」添加上游/);
+  // 上游站点里没有站长自己的站点
+  assert.deepEqual(await T(p, "au-site").locator("option").allTextContents(), ["Beta"]);
+  assert.match(await T(p, "au-group").locator("option").first().textContent(), /· ×/, "分组旁边显示倍率");
+  const name = await T(p, "au-name").inputValue();
+  assert.match(name, /^Beta-/, `名称默认“站点名-分组名”: ${name}`);
+  assert.equal(await count(p, '[data-testid="au-paused"]'), 0, "不再有“先暂停”选项，默认就是先暂停");
+  const preview = await T(p, "au-preview").textContent();
+  assert.match(preview, /创建（或复用）一把专用 Key.*发一句“hi”试一次/);
+  assert.match(preview, /先把它暂停/);
+  assert.match(preview, /任何一步失败都会撤销/);
+  assert.deepEqual(await opsLog(p), [], "点创建之前不会做任何事");
+  await T(p, "au-name").fill("我的上游 A");
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  const res = await T(p, "add-upstream-result").textContent();
+  assert.match(res, /上游账号「我的上游 A」已创建，绑定到下游分组「Claude 逆向Kiro」/);
+  assert.match(res, /读到 4 个可用模型/);
+  assert.match(res, /首字时延 0\.82s，链路是通的/);
+  assert.match(res, /现在是暂停状态/);
+  assert.equal((await opsLog(p)).length, 1);
+  assert.match((await opsLog(p))[0], /^add-upstream:4:beta:Claude 逆向Kiro:true$/);
+  // 启用
+  await T(p, "au-resume").click();
+  await p.waitForFunction(() => /已经启用，正在参与调度|已启用/.test(document.querySelector('[data-testid="add-upstream-result"]')?.textContent ?? "") || !document.querySelector('[data-testid="au-resume"]'));
+  assert.equal((await opsLog(p)).at(-1), "resume:a4");
+  await T(p, "au-done").click();
+  await T(p, "add-upstream-dialog").waitFor({ state: "detached" });
+  // 新上游出现在这个下游分组的色块里
+  await p.waitForFunction(() => document.querySelector('[data-testid="down-block-4"]')?.textContent?.includes("我的上游 A"));
+  await done(p);
+});
+
+test("站长：添加上游失败（比如上游余额不足）时，错误留在对话框里；没有其他站点时引导先添加上游站点", async () => {
+  const p = await open("sites2,admin,addfail");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-addup-4").click({ force: true });
+  await T(p, "au-submit").click();
+  await p.waitForFunction(() => /没通：Insufficient account balance/.test(document.querySelector('[data-testid="au-error"]')?.textContent ?? ""));
+  assert.equal(await count(p, '[data-testid="add-upstream-result"]'), 0);
+  assert.equal(await T(p, "au-submit").isDisabled(), false, "可以改了重试");
+  await done(p);
+  const q = await open("sites1,admin");
+  await T(q, "operator-alpha").click();
+  await T(q, "down-addup-4").click({ force: true });
+  assert.match(await T(q, "add-upstream-dialog").textContent(), /还没有可以当上游的站点/);
+  assert.equal(await count(q, '[data-testid="au-submit"]'), 0);
+  await T(q, "au-add-site").click();
+  await T(q, "add-dialog").waitFor();
+  await done(q);
+});
+
+test("站长：新建下游分组——填名称、备注、分类、倍率，创建后直接打开“添加上游”；new-api 没有分类", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-new-group").click();
+  await T(p, "create-group-dialog").waitFor();
+  await T(p, "cg-submit").click();
+  assert.equal(await T(p, "cg-error").textContent(), "名称不能为空");
+  await T(p, "cg-name").fill("新的下游");
+  await T(p, "cg-rate").fill("abc");
+  await T(p, "cg-submit").click();
+  assert.match(await T(p, "cg-error").textContent(), /倍率必须是大于 0 的数字/);
+  await T(p, "cg-desc").fill("备注一下");
+  await T(p, "cg-platform").selectOption("openai");
+  await T(p, "cg-rate").fill("0.6");
+  await T(p, "cg-submit").click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "add-upstream-dialog").textContent(), /给「新的下游」添加上游/);
+  assert.deepEqual(await opsLog(p), ["create-group:新的下游:openai:0.6"]);
+  await T(p, "au-cancel").click();
+  await p.waitForFunction(() => document.querySelector('[data-testid="down-block-n5"]'));
+  await done(p);
+  const q = await open("sites2,admin");
+  await T(q, "operator-beta").click();
+  await T(q, "op-new-group").click();
+  assert.equal(await count(q, '[data-testid="cg-platform"]'), 0, "new-api 没有分类");
+  await done(q);
+  const r = await open("sites2,admin,createfail");
+  await T(r, "operator-alpha").click();
+  await T(r, "op-new-group").click();
+  await T(r, "cg-name").fill("重名");
+  await T(r, "cg-submit").click();
+  await r.waitForFunction(() => /已经有一个叫/.test(document.querySelector('[data-testid="cg-error"]')?.textContent ?? ""));
+  assert.equal(await count(r, '[data-testid="create-group-dialog"]'), 1, "错误留在对话框里");
+  await done(r);
+});
+
+// ---------- 分组行的“···”菜单：sayhi 测试 / 修改分组 / 创建下游 ----------
+
+test("启用按钮右边有“···”，悬停后换成三个图标（sayhi / 修改分组 / 创建下游），启用按钮不会消失", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  assert.equal(await T(p, "more-alpha-2").locator(".more-dots").evaluate((e) => getComputedStyle(e).opacity), "0", "平时隐藏");
+  await T(p, "group-card-alpha-2").hover();
+  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="more-alpha-2"] .more-dots')).opacity === "1");
+  // “···”在启用按钮右边
+  const xs = await p.evaluate(() => ["enable-alpha-2", "more-alpha-2"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
+  assert.ok(xs[0] < xs[1], `启用在左，···在右: ${xs}`);
+  assert.equal(await T(p, "sayhi-alpha-2").isVisible(), false, "没悬停到“···”上时三个图标不显示");
+  await T(p, "more-alpha-2").hover();
+  await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="sayhi-alpha-2"]').closest(".more-icons")).display === "flex");
+  const ix = await p.evaluate(() => ["sayhi", "editclients", "makedown"].map((k) => document.querySelector(`[data-testid="${k}-alpha-2"]`).getBoundingClientRect().left));
+  assert.ok(ix[0] < ix[1] && ix[1] < ix[2], `顺序：sayhi | 修改分组 | 创建下游，实际 ${ix}`);
+  assert.equal(await T(p, "enable-alpha-2").evaluate((e) => getComputedStyle(e).opacity), "1", "行还在悬停状态，启用按钮没消失");
+  await done(p);
+});
+
+test("sayhi 测试：选模型说 hi，看到回复和延迟；可以换模型再测；失败时显示站点原话", async () => {
+  const p = await open("sites1,plaza");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  await T(p, "more-alpha-2").hover();
+  await T(p, "sayhi-alpha-2").click();
+  await T(p, "sayhi-dialog").waitFor();
+  assert.ok((await T(p, "sh-model").locator("option").count()) >= 2, "列出这个分组的模型");
+  await T(p, "sh-model").selectOption("claude-opus-5-5");
+  await T(p, "sh-send").click();
+  await T(p, "sayhi-result-0").waitFor();
+  const r = await T(p, "sayhi-result-0").textContent();
+  assert.match(r, /claude-opus-5-5/);
+  assert.match(r, /首字 0\.64s/);
+  assert.match(r, /总耗时 1\.18s/);
+  assert.match(r, /你好！有什么我可以帮你的吗？/);
+  assert.match((await opsLog(p))[0], /^sayhi:alpha:2:claude-opus-5-5:claude$/, "按当前客户端的协议发");
+  await T(p, "sh-model").selectOption("claude-sonnet-5-5");
+  await T(p, "sh-send").click();
+  await p.waitForFunction(() => document.querySelector('[data-testid="sayhi-result-1"]'));
+  assert.match(await T(p, "sayhi-result-0").textContent(), /claude-sonnet-5-5/, "新的结果在最前面");
+  await T(p, "sh-close").click();
+  await T(p, "sayhi-dialog").waitFor({ state: "detached" });
+  await done(p);
+  const q = await open("sites1,plaza,sayhifail");
+  await T(q, "more-alpha-2").hover();
+  await T(q, "sayhi-alpha-2").click();
+  await T(q, "sh-send").click();
+  await q.waitForFunction(() => /Insufficient account balance/.test(document.querySelector('[data-testid="sh-error"]')?.textContent ?? ""));
+  await done(q);
+});
+
+test("修改分组支持的客户端：多选保存后分组出现在对应客户端下；恢复默认；至少选一个", async () => {
+  const p = await open("sites1");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 1);
+  await T(p, "client-codex").click();
+  assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "Claude 类分组默认不在 Codex 下");
+  await T(p, "client-claude").click();
+  await T(p, "more-alpha-2").hover();
+  await T(p, "editclients-alpha-2").click();
+  await T(p, "clients-dialog").waitFor();
+  assert.equal(await T(p, "ec-claude").isChecked(), true);
+  assert.equal(await T(p, "ec-codex").isChecked(), false);
+  await T(p, "ec-codex").check();
+  await T(p, "ec-gemini").check();
+  await T(p, "ec-claude_desktop").uncheck();
+  await T(p, "ec-save").click();
+  await T(p, "clients-dialog").waitFor({ state: "detached" });
+  assert.match((await opsLog(p)).at(-1), /^clients:alpha:2:claude,codex,gemini$/);
+  await T(p, "client-codex").click();
+  await T(p, "group-card-alpha-2").waitFor();
+  await T(p, "client-claude_desktop").click();
+  assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "取消勾选的客户端下不再出现");
+  // 至少选一个
+  await T(p, "client-claude").click();
+  await T(p, "more-alpha-2").hover();
+  await T(p, "editclients-alpha-2").click();
+  for (const c of ["claude", "codex", "gemini"]) await T(p, `ec-${c}`).uncheck();
+  await T(p, "ec-save").click();
+  assert.match(await T(p, "ec-error").textContent(), /至少选一个客户端/);
+  // 恢复默认
+  await T(p, "ec-reset").click();
+  await T(p, "clients-dialog").waitFor({ state: "detached" });
+  assert.match((await opsLog(p)).at(-1), /^clients:alpha:2:-$/);
+  await T(p, "client-codex").click();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="group-card-alpha-2"]'));
+  await done(p);
+});
+
+test("创建下游：选中转站，名称 / 类型默认复用上游分组，填倍率和备注；创建后上游分组底部显示下游的站点、分组、倍率", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  // alpha 的分组做上游、beta 当中转站（alpha 自己不能当自己的中转站）
+  await T(p, "more-alpha-2").hover();
+  await T(p, "makedown-alpha-2").click();
+  await T(p, "makedown-dialog").waitFor();
+  assert.deepEqual(await T(p, "md-site").locator("option").allTextContents(), ["Beta"], "只列别的中转站");
+  assert.equal(await T(p, "md-name").inputValue(), "Claude 官方系列高速", "名称默认用上游分组的");
+  assert.equal(await count(p, '[data-testid="md-platform"]'), 0, "new-api 中转站没有客户端类型");
+  assert.equal(await T(p, "md-rate").inputValue(), "2.5", "倍率默认是上游的");
+  assert.equal(await count(p, '[data-testid="md-paused"]'), 0, "不再有“先暂停”选项，默认就是先暂停");
+  await T(p, "md-name").fill("我的下游");
+  await T(p, "md-rate").fill("abc");
+  await T(p, "md-submit").click();
+  assert.match(await T(p, "md-error").textContent(), /倍率必须是大于 0 的数字/);
+  await T(p, "md-rate").fill("3.5");
+  await T(p, "md-desc").fill("测试勿用");
+  await T(p, "md-submit").click();
+  await T(p, "makedown-result").waitFor();
+  assert.match(await T(p, "makedown-result").textContent(), /创建了下游分组「我的下游」（×3\.5）/);
+  assert.match(await T(p, "makedown-result").textContent(), /上游现在是暂停状态/);
+  assert.equal((await opsLog(p)).at(-1), "create-downstream:beta:alpha:2:我的下游:-:3.5:测试勿用:true");
+  await T(p, "md-done").click();
+  // 上游分组底部显示下游
+  await p.waitForFunction(() => document.querySelector('[data-testid="downs-alpha-2"]'));
+  const line = await T(p, "downs-alpha-2").textContent();
+  assert.match(line, /Beta/);
+  assert.match(line, /我的下游/);
+  assert.match(line, /×3\.5/);
+  // 在分组名和“该站点未对分组分类”之下（卡片底部）
+  const pos = await p.evaluate(() => { const c = document.querySelector('[data-testid="group-card-alpha-2"]'); return { h3: c.querySelector("h3").getBoundingClientRect().bottom, downs: c.querySelector('[data-testid="downs-alpha-2"]').getBoundingClientRect().top }; });
+  assert.ok(pos.downs >= pos.h3, "下游在分组名下面");
+  await done(p);
+});
+
+test("创建下游：没有别的中转站时引导去添加；创建失败时错误留在对话框里", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  await T(p, "more-alpha-2").hover();
+  await T(p, "makedown-alpha-2").click();
+  assert.match(await T(p, "makedown-dialog").textContent(), /还没有你的中转站/);
+  await T(p, "md-add-site").click();
+  await T(p, "add-dialog").waitFor();
+  await done(p);
+  const q = await open("sites2,admin,downfail");
+  await T(q, "group-card-alpha-2").waitFor();
+  await q.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
+  await T(q, "more-alpha-2").hover();
+  await T(q, "makedown-alpha-2").click();
+  await T(q, "md-submit").click();
+  await q.waitForFunction(() => /已经创建，但添加上游失败.*Insufficient account balance/.test(document.querySelector('[data-testid="md-error"]')?.textContent ?? ""));
+  assert.equal(await count(q, '[data-testid="makedown-result"]'), 0);
+  await done(q);
+});
+
+
+test("左侧导航同一时间只有一张卡片处于激活；在中转站管理里点上游站点卡片能切回去；中转站卡片上有红点 + 异常数量", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").waitFor();
+  const active = () => p.evaluate(() => [...document.querySelectorAll(".sidebar .side-item.selected, .sidebar .site-tab.on")].map((e) => e.getAttribute("data-testid")));
+  assert.deepEqual(await active(), ["site-tab-all"], "普通视图：只有“全部站点”激活");
+  // 中转站卡片上的红点和数量（概览一读到就有，不用点进去）
+  await p.waitForFunction(() => document.querySelector('[data-testid="operator-n-alpha"]'));
+  assert.equal(await T(p, "operator-n-alpha").textContent(), "2", "mock 里 alpha 有 2 个有问题的分组");
+  assert.equal(await T(p, "operator-dot-alpha").getAttribute("class"), "tab-dot bad");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-list").waitFor();
+  assert.deepEqual(await active(), ["operator-alpha"], "进了中转站：只有它激活，上游站点里没有高亮的");
+  assert.equal(await count(p, '[data-testid="client-tabs"]'), 0);
+  // 再点上游站点的卡片：切回分组列表，筛选到这个站点，并且只有这张卡片激活
+  await T(p, "site-name-beta").click();
+  await T(p, "group-list").waitFor();
+  assert.deepEqual(await active(), ["site-beta"]);
+  assert.equal(await cards(p), 1, "按这个站点筛选");
+  // 点“全部站点”也一样
+  await T(p, "operator-alpha").click();
+  await T(p, "op-list").waitFor();
+  await p.mouse.move(0, 0);
+  await T(p, "site-tab-all").click();
+  await T(p, "group-list").waitFor();
+  assert.deepEqual(await active(), ["site-tab-all"]);
+  // 正常的站点是绿点（beta 在 mock 里只有一个有上游的分组）
+  assert.equal(await count(p, '[data-testid="operator-n-beta"]'), 0);
+  assert.equal(await T(p, "operator-dot-beta").getAttribute("class"), "tab-dot ok");
+  await done(p);
+});
+
+test("检查更新的左边显示当前版本号", async () => {
+  const p = await open("sites1");
+  await T(p, "app-version").waitFor();
+  assert.equal(await T(p, "app-version").textContent(), "v0.5.0");
+  const xs = await p.evaluate(() => ["app-version", "check-update"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
+  assert.ok(xs[0] < xs[1], `版本号在“检查更新”左边: ${xs}`);
+  await done(p);
+});
+
+// ---------- 站长：排序 / 删除下游分组 / 更换上游来源 / 重复添加提示 / 预测倍率可点 ----------
+
+test("中转站列表：默认按 24h流水 从高到低；每一列标题都能排序，没有数据的排最后", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]') && document.querySelector('[data-testid="group-tokens-2"]'));
+  const order = () => p.evaluate(() => [...document.querySelectorAll('[data-testid^="down-block-"]')].map((e) => e.getAttribute("data-testid").replace("down-block-", "")));
+  assert.match(await T(p, "op-sort-tokens").getAttribute("class"), /\bon\b/, "默认按 24h流水 排序");
+  // mock 里 24h Token：分组 2 = 25.9M，4 = 340K，12 = 340K，99 = 没有（无用量）→ 2 最前，99 最后
+  const o1 = await order();
+  assert.equal(o1[0], "2");
+  assert.equal(o1.at(-1), "99");
+  // 再点一次：升序，没有数据的仍在最后
+  await T(p, "op-sort-tokens").click();
+  const o2 = await order();
+  assert.equal(o2.at(-1), "99", "没有数据的始终排最后");
+  assert.equal(o2[0] !== "2", true, "升序时 25.9M 的不在最前");
+  // 按名称排序：升序
+  await T(p, "op-sort-name").click();
+  const names = await p.locator('[data-testid^="down-name-"]').allTextContents();
+  assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b)), "按名称升序");
+  // 按倍率降序：2.5(分组 2)最前
+  await T(p, "op-sort-rate").click();
+  assert.equal((await order())[0], "2");
+  // 每个标题都是可点的排序按钮
+  assert.deepEqual(await p.locator('[data-testid="op-list-head"] button.sortable').count(), 7);
+  await done(p);
+});
+
+test("删除下游分组：弹窗列出绑在它上面的上游（不会被删），确认后分组消失；站点拒绝时错误留在弹窗里", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-remove-12").waitFor();
+  await T(p, "down-remove-12").click({ force: true });
+  await T(p, "remove-group-dialog").waitFor();
+  assert.match(await T(p, "remove-group-dialog").textContent(), /删除下游分组「Claude 逆向Kiro - 特价」/);
+  assert.match(await T(p, "rg-ups").textContent(), /不会被删除，只是不再服务这个分组/);
+  assert.deepEqual(await opsLog(p), [], "确认前不会删");
+  await T(p, "rg-confirm").click();
+  await T(p, "down-block-12").waitFor({ state: "detached" });
+  assert.deepEqual(await opsLog(p), ["remove-group:12"]);
+  await done(p);
+  const q = await open("sites1,admin,rmgroupfail");
+  await T(q, "operator-alpha").click();
+  await T(q, "down-remove-12").click({ force: true });
+  await T(q, "rg-confirm").click();
+  await q.waitForFunction(() => /该分组下还有用户的 Key，不能删除/.test(document.querySelector('[data-testid="rg-error"]')?.textContent ?? ""));
+  assert.equal(await count(q, '[data-testid="remove-group-dialog"]'), 1);
+  await done(q);
+});
+
+test("上游行的编辑图标：打开添加上游的弹窗（复用），改它的上游分组来源；名称不变、状态不变", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-edit-u1").first().waitFor();
+  await T(p, "up-edit-u1").first().click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "add-upstream-dialog").textContent(), /更换「官方账号池 0\.09」的上游分组来源/);
+  assert.equal(await T(p, "au-name").isDisabled(), true, "sub2api：更换来源时名称不变");
+  assert.equal(await count(p, '[data-testid="au-paused"]'), 0, "不问先暂停：保持原来的状态");
+  assert.match(await T(p, "au-preview").textContent(), /就地改成新的来源/);
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  assert.match(await T(p, "add-upstream-result").textContent(), /来源已改为「Beta」/);
+  assert.match((await opsLog(p)).at(-1), /^replace:u1:beta:/);
+  assert.equal(await count(p, '[data-testid="au-resume"]'), 0);
+  await T(p, "au-done").click();
+  await done(p);
+  const q = await open("sites2,admin,replacefail");
+  await T(q, "operator-alpha").click();
+  await T(q, "up-edit-u1").first().click();
+  await T(q, "au-submit").click();
+  await q.waitForFunction(() => /没通：Insufficient account balance/.test(document.querySelector('[data-testid="au-error"]')?.textContent ?? ""));
+  await done(q);
+});
+
+test("同一个上游分组再添加一次：提示会共用同一把上游 Key、会顶掉先到的用户，勾选确认后才能继续", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "account-rate-u1").first().waitFor();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  // 把上游账号 u1 关联到 Beta 的“Claude 逆向Kiro”分组（它正在用这个分组的 Key）
+  await linkVia(p, "u1", { site: "beta", group: "Claude 逆向Kiro" });
+  await p.waitForFunction(() => document.querySelector('[data-testid="account-rate-u1"]')?.textContent === "×0.3");
+  // 再给别的下游分组添加同一个上游分组：弹出警告
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  await T(p, "down-addup-12").click({ force: true });
+  await T(p, "au-dup").waitFor();
+  await p.waitForTimeout(400); // 等后台的重新读取（loadAdmin）把对话框重绘完
+  assert.match(await T(p, "au-dup").textContent(), /已经被上游账号「官方账号池 0\.09」使用.*共用同一把上游 Key.*顶掉/);
+  assert.match(await T(p, "au-name").inputValue(), /\(2\)$/, "默认名称加 (2) 避免重名");
+  // 没勾选确认：不让继续
+  await T(p, "au-submit").click();
+  assert.match(await T(p, "au-error").textContent(), /请先勾选“我知道会共用同一把上游 Key，仍然添加”/);
+  assert.equal((await opsLog(p)).filter((o) => o.startsWith("add-upstream")).length, 0);
+  await T(p, "au-dup-ok").check();
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  assert.match((await opsLog(p)).at(-1), /^add-upstream:12:beta:Claude 逆向Kiro:true$/);
+  await done(p);
+});
+
+test("预测的上游倍率（虚线）可以点：站点还没添加就打开添加站点并填好地址；提示文案是新的", async () => {
+  const p = await open("sites1,admin,hint");
+  await T(p, "operator-alpha").click();
+  await T(p, "account-rate-u3").first().waitFor();
+  assert.equal(await T(p, "account-rate-u3").first().textContent(), "×0.7");
+  assert.equal(await T(p, "account-rate-u3").first().getAttribute("data-tip"), "按账号名称末尾的数字推测的上游倍率，仅供参考,可关联真实上游的分组，实现倍率监控");
+  await T(p, "account-rate-u3").first().click();
+  await T(p, "add-dialog").waitFor();
+  assert.equal(await T(p, "add-url").inputValue(), "api.up-three.com", "地址已填好");
+  await done(p);
+});
+
+test("添加上游站点的账号后，中转站顶部“还没有添加你的账号”的提示去掉那个站点；再次登录已有站点会提示替换", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "op-missing").waitFor();
+  await T(p, "site-name-alpha").click(); // 回到普通视图
+  await T(p, "add-site").click();
+  await T(p, "add-url").fill("alpha.example.com");
+  await T(p, "add-submit").click();
+  await T(p, "add-username").waitFor();
+  assert.match(await T(p, "add-replace-warn").textContent(), /这个站点已经添加过.*再次登录会替换掉它.*顶掉/);
+  assert.equal(await T(p, "add-submit").textContent(), "替换并登录");
+  await done(p);
+});
+
+test("对话框比窗口高时自己滚动，底部的按钮始终在窗口里能点到", async () => {
+  const p = await open("sites2,admin", { width: 1100, height: 520 });
+  await T(p, "operator-alpha").click();
+  await T(p, "down-addup-12").click({ force: true });
+  await T(p, "add-upstream-dialog").waitFor();
+  const g = await p.evaluate(() => { const m = document.querySelector(".modal").getBoundingClientRect(); const b = document.querySelector('[data-testid="au-submit"]').getBoundingClientRect(); return { modalBottom: m.bottom, btnBottom: b.bottom, vh: innerHeight }; });
+  assert.ok(g.modalBottom <= g.vh, `对话框不超出窗口: ${g.modalBottom} > ${g.vh}`);
+  assert.ok(g.btnBottom <= g.vh, `创建按钮在窗口里: ${g.btnBottom} > ${g.vh}`);
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  await done(p);
+});
+
+// ---------- 更换来源弹窗的左侧导航、测试模型、上游行 sayhi、列名 ----------
+
+test("“平均成本”：列表和中转站的列标题都叫“平均成本”，不再叫“Token成本”", async () => {
+  const p = await open("sites1,admin");
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.match(await T(p, "sort-cost").textContent(), /^平均成本/);
+  await T(p, "operator-alpha").click();
+  await T(p, "op-sort-cost").waitFor();
+  assert.match(await T(p, "op-sort-cost").textContent(), /^平均成本/);
+  assert.ok(!(await p.locator(".content").textContent()).includes("Token成本"), "页面上不再出现“Token成本”");
+  await done(p);
+});
+
+test("更换来源的弹窗：左侧导航“上游调整 / 账号状态”，账号状态里快速改“状态”和“调度”，并提示两个都对用户才能调用通", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-edit-u2").first().click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "au-nav-source").getAttribute("class"), /\bon\b/, "默认是“上游调整”");
+  assert.equal(await T(p, "au-site").count(), 1, "上游调整里是现在的设置");
+  await T(p, "au-nav-state").click();
+  assert.match(await T(p, "st-hint").textContent(), /状态 = 启用、调度 = 开启，用户才能调用通/);
+  // u2：状态启用但调度关闭 → 现在调用不通
+  assert.match(await T(p, "st-now").textContent(), /不会被调用到.*调度是“关闭”/);
+  await T(p, "st-sched-on").click();
+  await p.waitForFunction(() => /这个上游能被用户调用到/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  assert.equal((await opsLog(p)).at(-1), "state:u2:-:true");
+  // 状态改成停用 → 又不通了，并且调度不动
+  await T(p, "st-status-inactive").click();
+  await p.waitForFunction(() => /状态不是“启用”/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  assert.equal((await opsLog(p)).at(-1), "state:u2:inactive:-");
+  await T(p, "st-status-active").click();
+  await p.waitForFunction(() => /这个上游能被用户调用到/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  await T(p, "st-close").click();
+  await T(p, "add-upstream-dialog").waitFor({ state: "detached" });
+  await done(p);
+  // new-api 的渠道只有“状态”一个开关，没有“调度”
+  const q = await open("sites2,admin");
+  await T(q, "operator-beta").click();
+  await T(q, "up-edit-7").first().click();
+  await T(q, "au-nav-state").click();
+  assert.equal(await count(q, '[data-testid="st-sched-on"]'), 0, "没有调度开关");
+  assert.equal(await count(q, '[data-testid="st-status-active"]'), 1);
+  assert.match(await T(q, "st-hint").textContent(), /只有一个开关/);
+  await done(q);
+});
+
+test("上游分组下面的“测试模型”：列出该分组的模型，选哪个就用哪个测；默认自动；添加和更换都有", async () => {
+  const p = await open("sites2,admin,plaza");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-addup-4").click({ force: true });
+  await T(p, "au-model").waitFor();
+  const opts = await T(p, "au-model").locator("option").allTextContents();
+  assert.equal(opts[0], "自动（挑一个便宜的）");
+  assert.ok(opts.length >= 2, `列出该分组的模型: ${opts}`);
+  await T(p, "au-model").selectOption(opts[1]);
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  assert.match((await opsLog(p)).at(-1), new RegExp(`:model=${opts[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "按选的模型测");
+  await T(p, "au-done").click();
+  // 换分组时重置回“自动”
+  await T(p, "down-addup-12").click({ force: true });
+  await T(p, "au-model").waitFor();
+  assert.equal(await T(p, "au-model").inputValue(), "");
+  await done(p);
+});
+
+test("上游账号右边有 sayhi 测试图标：关联了上游分组就复用 sayhi 弹窗测那个分组；没关联时提示先关联", async () => {
+  const p = await open("sites2,admin,plaza");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-sayhi-u3").first().waitFor();
+  // u3 没有关联信息：提示
+  await T(p, "up-sayhi-u3").first().click({ force: true });
+  await T(p, "toast").waitFor();
+  assert.match(await T(p, "toast").textContent(), /先关联这个上游账号用的上游分组/);
+  // u1 有关联（mock 里关联到 Beta 的分组）：打开 sayhi 弹窗
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  await linkVia(p, "u1", { site: "beta", group: "Claude 逆向Kiro" });
+  await p.waitForFunction(() => document.querySelector('[data-testid="account-rate-u1"]')?.textContent === "×0.3");
+  await T(p, "up-sayhi-u1").first().click({ force: true });
+  await T(p, "sayhi-dialog").waitFor();
+  assert.match(await T(p, "sayhi-dialog").textContent(), /sayhi 测试 · Claude 逆向Kiro/);
+  await T(p, "sh-send").click();
+  await T(p, "sayhi-result-0").waitFor();
+  assert.match(await T(p, "sayhi-result-0").textContent(), /你好！/);
+  await done(p);
+});
+
+test("添加站点的第一步不再写“填你平时登录的那个中转站网址”", async () => {
+  const p = await open();
+  await T(p, "empty-sites-add").click();
+  await T(p, "add-url").waitFor();
+  assert.ok(!(await p.locator(".modal").innerText()).includes("填你平时登录的那个中转站网址"));
   await done(p);
 });

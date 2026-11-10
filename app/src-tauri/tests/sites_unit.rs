@@ -21,7 +21,6 @@ fn normalize_url_rejects_unsafe_or_malformed_input() {
     for (bad, why) in [
         ("", "空"),
         ("   ", "空白"),
-        ("http://api.example.com", "明文 http 的远程站点"),
         ("ftp://api.example.com", "非 http 协议"),
         ("https://", "没有主机"),
         ("https://user:pass@api.example.com", "带账号密码的地址"),
@@ -31,7 +30,9 @@ fn normalize_url_rejects_unsafe_or_malformed_input() {
     ] {
         assert!(normalize_url(bad).is_err(), "{why}: {bad:?} 应被拒绝");
     }
-    assert!(normalize_url("http://api.example.com").unwrap_err().contains("https"));
+    // 明文 http 的远程站点也支持（不少自建站没有证书），界面里会提醒账号密码是明文传输的
+    assert_eq!(normalize_url("http://173.231.49.42:3200/").unwrap(), "http://173.231.49.42:3200");
+    assert_eq!(normalize_url("HTTP://Api.Example.com").unwrap(), "http://api.example.com");
 }
 
 #[test]

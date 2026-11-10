@@ -506,6 +506,23 @@ impl Client {
         v
     }
 
+    /// 翻页读取消费类日志（最多 `USAGE_PAGES` 页，每页 100 条）。`path` 是 `/api/log/self`（自己的）或 `/api/log/`（管理员看全站的），`filter` 是 `group=…` / `channel=…`。
+    async fn fetch_logs(&self, path: &str, filter: &str, start: i64, end: i64) -> Result<(Vec<Value>, Option<i64>), String> {
+        let mut logs: Vec<Value> = vec![];
+        let mut total: Option<i64> = None;
+        for page in 1..=USAGE_PAGES {
+            let v = self.call(Method::GET, &format!("{path}?p={page}&page_size=100&type=2&{filter}&start_timestamp={start}&end_timestamp={end}"), None).await?;
+            let items = v.pointer("/data/items").and_then(Value::as_array).cloned().unwrap_or_default();
+            total = v.pointer("/data/total").and_then(Value::as_i64).or(total);
+            let n = items.len();
+            logs.extend(items);
+            if n < 100 || total.is_some_and(|t| logs.len() as i64 >= t) {
+                break;
+            }
+        }
+        Ok((logs, total))
+    }
+
     /// 近 7 天这个分组的成本统计，来自“我的使用日志”（`/api/log/self`，只读消费类记录，最多翻 3 页共 300 条）。
     /// new-api 没有官方价合计，所以没有“实际倍率”；预估价格由 `/api/pricing` 的模型倍率 × 分组倍率算出。
     pub async fn group_usage(&self, group: &GroupInfo) -> Result<GroupUsage, String> {
@@ -515,65 +532,8 @@ impl Client {
         let end = now();
         let start = end - WINDOW_DAYS as i64 * 86_400;
         let enc: String = group.name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-        let mut logs: Vec<Value> = vec![];
-        let mut total: Option<i64> = None;
-        for page in 1..=USAGE_PAGES {
-            let v = self.call(Method::GET, &format!("/api/log/self?p={page}&page_size=100&type=2&group={enc}&start_timestamp={start}&end_timestamp={end}"), None).await?;
-            let items = v.pointer("/data/items").and_then(Value::as_array).cloned().unwrap_or_default();
-            total = v.pointer("/data/total").and_then(Value::as_i64).or(total);
-            let n = items.len();
-            logs.extend(items);
-            if n < 100 || total.is_some_and(|t| logs.len() as i64 >= t) {
-                break;
-            }
-        }
-        let mut by_model: BTreeMap<String, ModelUsage> = BTreeMap::new();
-        let mut frt: Vec<u64> = vec![];
-        let (mut dur_sum, mut dur_n) = (0.0, 0u32);
-        for l in &logs {
-            let i = |k: &str| l.get(k).and_then(Value::as_i64).unwrap_or(0);
-            // `other` 在不同版本里可能是 JSON 字符串，也可能直接是对象
-            let other = match l.get("other") {
-                Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
-                Some(v) => v.clone(),
-                None => Value::Null,
-            };
-            let oi = |k: &str| other.get(k).and_then(Value::as_i64).unwrap_or(0);
-            let (cr, cc) = (oi("cache_tokens"), oi("cache_creation_tokens"));
-            // `usage_semantic` 说明 prompt_tokens 的口径：anthropic = 不含缓存；其余（OpenAI 等）= 已含缓存读取，要扣掉才是真正的新输入
-            let semantic = other.get("usage_semantic").and_then(Value::as_str).unwrap_or("");
-            let prompt = i("prompt_tokens");
-            let inp = if semantic.is_empty() || semantic == "anthropic" { prompt } else { (prompt - cr).max(0) };
-            let (out, cost) = (i("completion_tokens"), i("quota") as f64 * factor);
-            u.input_tokens += inp;
-            u.output_tokens += out;
-            u.cache_read_tokens += cr;
-            u.cache_creation_tokens += cc;
-            u.cost += cost;
-            if let Some(f) = other.get("frt").and_then(Value::as_i64).filter(|f| *f > 0) {
-                frt.push(f as u64);
-            }
-            let t = i("use_time");
-            if t > 0 {
-                dur_sum += t as f64 * 1000.0;
-                dur_n += 1;
-            }
-            let m = by_model.entry(l.get("model_name").and_then(Value::as_str).unwrap_or("?").to_string()).or_default();
-            m.model = l.get("model_name").and_then(Value::as_str).unwrap_or("?").to_string();
-            m.requests += 1;
-            m.input_tokens += inp;
-            m.output_tokens += out;
-            m.cache_read_tokens += cr;
-            m.cache_creation_tokens += cc;
-            m.cost += cost;
-        }
-        u.requests = logs.len() as i64;
-        u.sample_requests = logs.len();
-        u.total_requests = total.unwrap_or(u.requests).max(u.requests);
-        u.sampled = u.total_requests > u.requests;
-        u.avg_duration_ms = (dur_n > 0).then(|| dur_sum / dur_n as f64);
-        (u.first_token_median_ms, u.first_token_p90_ms, u.first_token_samples) = latency_summary(frt);
-        u.models = by_model.into_values().collect();
+        let (logs, total) = self.fetch_logs("/api/log/self", &format!("group={enc}"), start, end).await?;
+        fold_logs(&mut u, &logs, total, factor);
 
         // 预估价格：模型倍率 × 2 = 每百万输入 token 的美元价，再乘分组倍率
         let pricing = self.cached_pricing().await;
@@ -612,10 +572,324 @@ impl Client {
         self.http.models_for_key(key).await
     }
 
+    pub async fn models_result(&self, key: &str) -> Result<Vec<String>, String> {
+        self.http.models_for_key_result(key).await
+    }
+
     pub async fn topup_url(&self) -> String {
         match self.site_info().await {
             Ok(i) => i.top_up_link.unwrap_or_else(|| format!("{}/console/topup", self.http.base)),
             Err(_) => format!("{}/console/topup", self.http.base),
+        }
+    }
+}
+
+/* ---------- 日志汇总 ---------- */
+
+/// 把一批消费日志累加进 `u`（token、缓存、花费、首字时延、按模型）。`factor` 是额度换成显示货币的系数。
+fn fold_logs(u: &mut GroupUsage, logs: &[Value], total: Option<i64>, factor: f64) {
+    let mut by_model: BTreeMap<String, ModelUsage> = BTreeMap::new();
+    let mut frt: Vec<u64> = vec![];
+    let (mut dur_sum, mut dur_n) = (0.0, 0u32);
+    for l in logs {
+        let i = |k: &str| l.get(k).and_then(Value::as_i64).unwrap_or(0);
+        // `other` 在不同版本里可能是 JSON 字符串，也可能直接是对象
+        let other = match l.get("other") {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        };
+        let oi = |k: &str| other.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let (cr, cc) = (oi("cache_tokens"), oi("cache_creation_tokens"));
+        // `usage_semantic` 说明 prompt_tokens 的口径：anthropic = 不含缓存；其余（OpenAI 等）= 已含缓存读取，要扣掉才是真正的新输入
+        let semantic = other.get("usage_semantic").and_then(Value::as_str).unwrap_or("");
+        let prompt = i("prompt_tokens");
+        let inp = if semantic.is_empty() || semantic == "anthropic" { prompt } else { (prompt - cr).max(0) };
+        let (out, cost) = (i("completion_tokens"), i("quota") as f64 * factor);
+        u.input_tokens += inp;
+        u.output_tokens += out;
+        u.cache_read_tokens += cr;
+        u.cache_creation_tokens += cc;
+        u.cost += cost;
+        if let Some(f) = other.get("frt").and_then(Value::as_i64).filter(|f| *f > 0) {
+            frt.push(f as u64);
+        }
+        let t = i("use_time");
+        if t > 0 {
+            dur_sum += t as f64 * 1000.0;
+            dur_n += 1;
+        }
+        let m = by_model.entry(l.get("model_name").and_then(Value::as_str).unwrap_or("?").to_string()).or_default();
+        m.model = l.get("model_name").and_then(Value::as_str).unwrap_or("?").to_string();
+        m.requests += 1;
+        m.input_tokens += inp;
+        m.output_tokens += out;
+        m.cache_read_tokens += cr;
+        m.cache_creation_tokens += cc;
+        m.cost += cost;
+    }
+    // 过去 24 小时的 Token 量：日志按时间倒序，翻满了而最旧的一条还在 24 小时内，说明真实值更大
+    let cutoff = now() - 86_400;
+    let at = |l: &Value| l.get("created_at").and_then(Value::as_i64).unwrap_or(0);
+    let tok = |l: &Value| {
+        let other = match l.get("other") {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+            Some(v) => v.clone(),
+            None => Value::Null,
+        };
+        let o = |k: &str| other.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let i = |k: &str| l.get(k).and_then(Value::as_i64).unwrap_or(0);
+        i("prompt_tokens") + i("completion_tokens") + o("cache_creation_tokens") + if other.get("usage_semantic").and_then(Value::as_str).is_some_and(|s| s != "anthropic" && !s.is_empty()) { 0 } else { o("cache_tokens") }
+    };
+    u.tokens_24h = Some(logs.iter().filter(|l| at(l) >= cutoff).map(tok).sum());
+    u.cost_24h = Some(logs.iter().filter(|l| at(l) >= cutoff).map(|l| l.get("quota").and_then(Value::as_i64).unwrap_or(0) as f64 * factor).sum());
+    u.tokens_24h_capped = total.is_some_and(|t| t > logs.len() as i64) && logs.iter().map(at).min().is_some_and(|m| m >= cutoff);
+    u.requests = logs.len() as i64;
+    u.sample_requests = logs.len();
+    u.total_requests = total.unwrap_or(u.requests).max(u.requests);
+    u.sampled = u.total_requests > u.requests;
+    u.avg_duration_ms = (dur_n > 0).then(|| dur_sum / dur_n as f64);
+    (u.first_token_median_ms, u.first_token_p90_ms, u.first_token_samples) = latency_summary(frt);
+    u.models = by_model.into_values().collect();
+
+}
+
+// ---------- 站长：上下游一体管理 ----------
+
+/// 一个渠道整理成 `Upstream`。渠道里的 `key` 等凭据一律不取。
+fn parse_channel(c: &Value) -> Option<crate::admin::Upstream> {
+    let id = c.get("id").and_then(Value::as_i64)?.to_string();
+    let status_n = c.get("status").and_then(Value::as_i64).unwrap_or(1);
+    let (status, error) = match status_n {
+        1 => ("active", None),
+        2 => ("paused", None),
+        _ => ("error", Some("被系统自动禁用（上游连续失败或额度用完）".to_string())),
+    };
+    let csv = |k: &str| -> Vec<String> { c.get(k).and_then(Value::as_str).unwrap_or("").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect() };
+    Some(crate::admin::Upstream {
+        id,
+        name: c.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+        // 渠道本身没有“平台”：按它支持的模型推断（claude → anthropic …），推断不出就留空
+        platform: Some(infer_platform(&csv("models"))).filter(|p| p != "unknown").unwrap_or_default(),
+        kind: c.get("type").and_then(Value::as_i64).map(|t| t.to_string()).unwrap_or_default(),
+        status: status.into(),
+        account_status: match status_n { 1 => "active", 2 => "inactive", _ => "error" }.into(),
+        schedulable: None,
+        error,
+        host: c.get("base_url").and_then(Value::as_str).filter(|s| !s.is_empty()).and_then(crate::admin::host_of),
+        groups: csv("group"),
+        models: csv("models").len(),
+        model_names: csv("models"),
+        rate_multiplier: None,
+        priority: c.get("priority").and_then(Value::as_i64),
+    })
+}
+
+/// `/api/option/` 里取某个 JSON 对象型设置（GroupRatio、UserUsableGroups）。
+fn option_object(opts: &Value, key: &str) -> serde_json::Map<String, Value> {
+    opts.get("data")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().find(|o| o.get("key").and_then(Value::as_str) == Some(key)))
+        .and_then(|o| o.get("value").and_then(Value::as_str))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+impl Client {
+    /// 当前登录的账号是不是管理员（渠道管理只有管理员能看）。
+    pub async fn admin_probe(&self) -> Result<(), String> {
+        self.call(Method::GET, "/api/channel/?p=1&page_size=1", None).await.map(|_| ()).map_err(|e| if e.contains("权限") || e.contains("无权") || e.to_lowercase().contains("permission") || e.to_lowercase().contains("unauthorized") { "该账号不是这个站点的管理员".to_string() } else { e })
+    }
+
+    pub async fn admin_overview(&self) -> Result<crate::admin::AdminOverview, String> {
+        let mut upstreams = vec![];
+        for page in 1..=30 {
+            let v = self.call(Method::GET, &format!("/api/channel/?p={page}&page_size=100"), None).await?;
+            let items = v.pointer("/data/items").and_then(Value::as_array).cloned().unwrap_or_default();
+            let n = items.len();
+            let total = v.pointer("/data/total").and_then(Value::as_u64).map(|t| t as usize);
+            upstreams.extend(items.iter().filter_map(parse_channel));
+            if n < 100 || total.is_some_and(|t| upstreams.len() >= t) {
+                break;
+            }
+        }
+        // 分组的倍率和备注在系统设置里（只有超级管理员能读）；读不到就只列出渠道里出现过的分组名，并标为不可编辑
+        let (ratios, descs, editable) = match self.call(Method::GET, "/api/option/", None).await {
+            Ok(opts) => (option_object(&opts, "GroupRatio"), option_object(&opts, "UserUsableGroups"), true),
+            Err(_) => (Default::default(), Default::default(), false),
+        };
+        let mut names: Vec<String> = ratios.keys().cloned().collect();
+        for g in upstreams.iter().flat_map(|u| u.groups.iter()) {
+            if !names.contains(g) {
+                names.push(g.clone());
+            }
+        }
+        names.sort();
+        let downstreams = names
+            .into_iter()
+            .map(|n| crate::admin::Downstream {
+                description: descs.get(&n).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from),
+                // 分组的类别：由它来源的渠道支持的模型推断
+                platform: Some(infer_platform(&upstreams.iter().filter(|u| u.groups.contains(&n)).flat_map(|u| u.model_names.clone()).collect::<Vec<_>>())).filter(|p| p != "unknown").unwrap_or_default(),
+                rate_multiplier: ratios.get(&n).and_then(Value::as_f64).unwrap_or(1.0),
+                status: "active".into(),
+                editable,
+                id: n.clone(),
+                name: n,
+            })
+            .collect();
+        Ok(crate::admin::AdminOverview { upstreams, downstreams, fetched_at: now() })
+    }
+
+    /// 暂停 / 恢复一个渠道。优先用专门的状态接口 `POST /api/channel/{id}/status`（api.aicompare.club 这个版本上实测可用，
+    /// 而它的 `PUT /api/channel/` 无论怎么传都返回 “Invalid parameters”）；站点没有这个接口（404）时，退回
+    /// “读出完整渠道、改状态、整条写回”：只发一个字段会让站点按残缺的记录重建能力表。
+    pub async fn admin_set_paused(&self, id: &str, paused: bool) -> Result<(), String> {
+        let status = if paused { 2 } else { 1 };
+        match self.call(Method::POST, &format!("/api/channel/{id}/status"), Some(json!({ "status": status }))).await {
+            Ok(_) => return Ok(()),
+            Err(e) if e.contains("404") || e.contains("Invalid URL") => {}
+            Err(e) => return Err(e),
+        }
+        let v = self.call(Method::GET, &format!("/api/channel/{id}"), None).await?;
+        let mut ch = v.get("data").cloned().ok_or("读不到这个渠道")?;
+        ch["status"] = json!(status);
+        self.call(Method::PUT, "/api/channel/", Some(ch)).await.map(|_| ())
+    }
+
+    pub async fn admin_remove_upstream(&self, id: &str) -> Result<(), String> {
+        self.call(Method::DELETE, &format!("/api/channel/{id}"), None).await.map(|_| ())
+    }
+
+    /// 改分组的倍率和备注（new-api 的分组名就是它的标识，已有的 Key、用户、渠道都按名字引用，所以不支持改名；也没有“分类”）。
+    pub async fn admin_update_group(&self, id: &str, edit: &crate::admin::GroupEdit) -> Result<(), String> {
+        edit.validate()?;
+        if edit.name.as_deref().is_some_and(|n| n.trim() != id) {
+            return Err("new-api 的分组名就是分组的标识，改名会让已有的 Key 和渠道对不上，请在站点后台处理".into());
+        }
+        let opts = self.call(Method::GET, "/api/option/", None).await.map_err(|e| format!("读不到分组设置（需要超级管理员）：{e}"))?;
+        let mut put = |key: &'static str, field: Value| {
+            let mut m = option_object(&opts, key);
+            m.insert(id.to_string(), field);
+            (key, Value::Object(m).to_string())
+        };
+        let mut writes = vec![];
+        if let Some(r) = edit.rate_multiplier {
+            writes.push(put("GroupRatio", json!(r)));
+        }
+        if let Some(d) = &edit.description {
+            writes.push(put("UserUsableGroups", json!(d)));
+        }
+        for (key, value) in writes {
+            self.call(Method::PUT, "/api/option/", Some(json!({ "key": key, "value": value }))).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Client {
+    /// 站长视角的近 7 天用量：读管理员能看的全站消费日志（`/api/log/`），`scope` 为 `group`（按分组名）或 `account`（按渠道 id）。
+    /// 注意：new-api 的日志里只有“用户付了多少额度”，没有“上游收了你多少”，所以渠道的花费是它带来的收入，不是上游成本。
+    pub async fn admin_usage(&self, scope: &str, id: &str) -> Result<GroupUsage, String> {
+        let info = self.site_info().await?;
+        let (symbol, factor) = money_factor(&info);
+        let mut u = GroupUsage { window_days: WINDOW_DAYS, currency: symbol, fetched_at: now(), ..Default::default() };
+        let end = now();
+        let start = end - WINDOW_DAYS as i64 * 86_400;
+        let filter = if scope == "account" {
+            id.parse::<i64>().map_err(|_| "id 不正确".to_string())?;
+            format!("channel={id}")
+        } else {
+            let enc: String = id.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+            format!("group={enc}")
+        };
+        let (logs, total) = self.fetch_logs("/api/log/", &filter, start, end).await?;
+        fold_logs(&mut u, &logs, total, factor);
+        if u.sampled {
+            u.notes.push(format!("窗口内共 {} 条记录，只统计了最近 {} 条", u.total_requests, u.requests));
+        }
+        u.finish();
+        Ok(u)
+    }
+}
+
+impl Client {
+    /// 新建下游分组：在系统设置里加上分组倍率和备注（需要超级管理员）。new-api 的分组名就是 id。
+    pub async fn admin_create_group(&self, g: &crate::admin::NewGroup) -> Result<String, String> {
+        g.validate()?;
+        let name = g.name.trim().to_string();
+        let opts = self.call(Method::GET, "/api/option/", None).await.map_err(|e| format!("读不到分组设置（需要超级管理员）：{e}"))?;
+        let mut ratios = option_object(&opts, "GroupRatio");
+        if ratios.contains_key(&name) {
+            return Err(format!("已经有一个叫「{name}」的分组"));
+        }
+        ratios.insert(name.clone(), json!(g.rate_multiplier));
+        self.call(Method::PUT, "/api/option/", Some(json!({ "key": "GroupRatio", "value": Value::Object(ratios).to_string() }))).await?;
+        if let Some(d) = g.description.as_ref().filter(|d| !d.trim().is_empty()) {
+            let mut descs = option_object(&opts, "UserUsableGroups");
+            descs.insert(name.clone(), json!(d.trim()));
+            self.call(Method::PUT, "/api/option/", Some(json!({ "key": "UserUsableGroups", "value": Value::Object(descs).to_string() }))).await?;
+        }
+        Ok(name)
+    }
+
+    /// 新建渠道并绑定到下游分组。new-api 的创建接口不返回 id，所以创建后按名称在列表里找最新的一个。
+    pub async fn admin_create_upstream(&self, u: &crate::admin::NewUpstream) -> Result<String, String> {
+        let channel = json!({
+            "name": u.name, "type": crate::admin::channel_type(&u.platform), "key": u.api_key, "base_url": u.base_url.trim_end_matches('/'),
+            "models": u.models.join(","), "group": u.group_ids.join(","), "priority": 0, "weight": 0, "status": 1,
+        });
+        self.call(Method::POST, "/api/channel/", Some(json!({ "mode": "single", "channel": channel }))).await?;
+        let mut best: Option<i64> = None;
+        for page in 1..=30 {
+            let v = self.call(Method::GET, &format!("/api/channel/?p={page}&page_size=100"), None).await?;
+            let items = v.pointer("/data/items").and_then(Value::as_array).cloned().unwrap_or_default();
+            let n = items.len();
+            for c in &items {
+                if c.get("name").and_then(Value::as_str).map(str::trim) == Some(u.name.trim()) {
+                    let id = c.get("id").and_then(Value::as_i64).unwrap_or(0);
+                    best = Some(best.map_or(id, |b| b.max(id)));
+                }
+            }
+            if n < 100 {
+                break;
+            }
+        }
+        best.map(|i| i.to_string()).ok_or_else(|| "渠道创建后在列表里找不到它".to_string())
+    }
+}
+
+impl Client {
+    /// 删除下游分组：从分组倍率和备注设置里去掉它（需要超级管理员）。渠道里绑着它的不会被改。
+    pub async fn admin_remove_group(&self, id: &str) -> Result<(), String> {
+        let opts = self.call(Method::GET, "/api/option/", None).await.map_err(|e| format!("读不到分组设置（需要超级管理员）：{e}"))?;
+        let mut ratios = option_object(&opts, "GroupRatio");
+        if ratios.remove(id).is_none() {
+            return Err(format!("设置里没有分组「{id}」"));
+        }
+        self.call(Method::PUT, "/api/option/", Some(json!({ "key": "GroupRatio", "value": Value::Object(ratios).to_string() }))).await?;
+        let mut descs = option_object(&opts, "UserUsableGroups");
+        if descs.remove(id).is_some() {
+            self.call(Method::PUT, "/api/option/", Some(json!({ "key": "UserUsableGroups", "value": Value::Object(descs).to_string() }))).await?;
+        }
+        Ok(())
+    }
+
+    /// 更换渠道的来源：这个版本的渠道更新接口不可靠（`PUT /api/channel/` 实测一律 Invalid parameters），
+    /// 所以不在原渠道上改，而是由调用方新建渠道、成功后再删旧的。这里不提供就地更新。
+    pub async fn admin_update_upstream_source(&self, _id: &str, _u: &crate::admin::NewUpstream) -> Result<(), String> {
+        Err("new-api 站点不支持就地更换来源".into())
+    }
+}
+
+impl Client {
+    /// new-api 的渠道只有一个开关（启用 / 停用）：`active` = 启用，`inactive` = 手动停用。
+    pub async fn admin_set_account_status(&self, id: &str, status: &str) -> Result<(), String> {
+        match status {
+            "active" => self.admin_set_paused(id, false).await,
+            "inactive" => self.admin_set_paused(id, true).await,
+            _ => Err("状态只能是 active 或 inactive".into()),
         }
     }
 }

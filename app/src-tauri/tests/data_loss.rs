@@ -9,7 +9,7 @@ use app_lib::state::AppState;
 use tempfile::TempDir;
 
 fn site(id: &str, name: &str, url: &str, kind: Kind) -> Site {
-    Site { id: id.into(), kind, name: name.into(), base_url: url.into() }
+    Site { id: id.into(), kind, name: name.into(), base_url: url.into(), is_admin: false }
 }
 
 #[tokio::test]

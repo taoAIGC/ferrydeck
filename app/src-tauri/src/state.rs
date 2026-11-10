@@ -12,6 +12,8 @@ use crate::sites::{self, AccountInfo, Kind, Site, SiteClient};
 
 pub struct SiteRuntime {
     pub site: Site,
+    /// 是否声明为站点管理员（可变，随登录时的勾选更新；保存时写回 `site.is_admin`）。
+    pub admin: std::sync::atomic::AtomicBool,
     pub client: SiteClient,
     pub account: AsyncMutex<Option<AccountInfo>>,
     /// 最近一次出错的原因（登录过期、网络问题等），用于界面提示。
@@ -44,6 +46,8 @@ pub struct SiteView {
     pub error: Option<String>,
     /// 凭据已失效或不存在，只能重新登录；为 false 而未连接时是网络等暂时性问题，会自动重试。
     pub needs_login: bool,
+    /// 登录时勾选了“我是该站点管理员”
+    pub is_admin: bool,
 }
 
 impl AppState {
@@ -57,7 +61,7 @@ impl AppState {
         let data_dir = paths.data.clone();
         let sink: sites::SecretSink = Arc::new(move |secret| session_store::save(&data_dir, &id, &secret));
         let client = SiteClient::new(site.kind, &site.base_url, sink);
-        Arc::new(SiteRuntime { site, client, account: AsyncMutex::new(None), error: AsyncMutex::new(None), data_dir: paths.data.clone(), last_groups: AsyncMutex::new(None), last_groups_at: std::sync::atomic::AtomicI64::new(0), usage_cache: Default::default() })
+        Arc::new(SiteRuntime { admin: std::sync::atomic::AtomicBool::new(site.is_admin), site, client, account: AsyncMutex::new(None), error: AsyncMutex::new(None), data_dir: paths.data.clone(), last_groups: AsyncMutex::new(None), last_groups_at: std::sync::atomic::AtomicI64::new(0), usage_cache: Default::default() })
     }
 
     pub async fn find(&self, id: &str) -> Result<Arc<SiteRuntime>, String> {
@@ -73,7 +77,7 @@ impl AppState {
     }
 
     pub async fn persist_sites(&self) -> Result<(), String> {
-        let list: Vec<Site> = self.sites.read().await.iter().map(|r| r.site.clone()).collect();
+        let list: Vec<Site> = self.sites.read().await.iter().map(|r| Site { is_admin: r.admin.load(std::sync::atomic::Ordering::Relaxed), ..r.site.clone() }).collect();
         // 备忘写失败不影响主流程（它只用来在数据被误删后提示用户）
         let _ = sites::save_known_sites(&self.paths.ferrydeck_home, &list);
         sites::save_sites(&self.paths.data, &list)
@@ -86,7 +90,7 @@ impl SiteRuntime {
         let error = self.error.lock().await.clone();
         let logged_in = self.client.is_logged_in().await;
         let needs_login = !logged_in || error.as_deref().is_some_and(sites::is_expired);
-        SiteView { id: self.site.id.clone(), kind: self.site.kind, name: self.site.name.clone(), base_url: self.site.base_url.clone(), connected: account.is_some() && logged_in, account, error, needs_login }
+        SiteView { id: self.site.id.clone(), kind: self.site.kind, name: self.site.name.clone(), base_url: self.site.base_url.clone(), connected: account.is_some() && logged_in, account, error, needs_login, is_admin: self.admin.load(std::sync::atomic::Ordering::Relaxed) }
     }
 
     pub async fn set_error(&self, e: Option<String>) {

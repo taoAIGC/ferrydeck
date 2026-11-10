@@ -40,6 +40,9 @@ impl Client {
 }
 
 /// 分组平台 → 可配置的客户端。Anthropic 分组既能配 Claude Code，也能配 Claude Desktop；Grok 等暂不支持。
+/// 界面里客户端的固定顺序。
+pub const CLIENTS_ORDER: [Client; 4] = [Client::Claude, Client::ClaudeDesktop, Client::Codex, Client::Gemini];
+
 pub fn clients_for(platform: &str) -> Vec<Client> {
     match platform {
         "anthropic" => vec![Client::Claude, Client::ClaudeDesktop],
@@ -154,11 +157,20 @@ pub async fn group_models(client: &SiteClient, group: &GroupInfo) -> Result<Vec<
 }
 
 pub async fn enable(client: &SiteClient, site: &Site, paths: &Paths, group: &GroupInfo, target: Client, model: Option<String>) -> Result<EnableOutcome, String> {
+    enable_with(client, site, paths, group, target, model, None).await
+}
+
+/// 同 `enable`；`allowed_override` 是用户手动设置的“这个分组支持哪些客户端”，有就不再按平台判断。
+pub async fn enable_with(client: &SiteClient, site: &Site, paths: &Paths, group: &GroupInfo, target: Client, model: Option<String>, allowed_override: Option<&[Client]>) -> Result<EnableOutcome, String> {
     if is_hidden_group(&group.name) {
         return Err("分组不存在或已无权使用".into());
     }
     // new-api 的分组没有平台字段，无法判断该配到哪个客户端，允许配到任意客户端
-    let allowed = if site.kind == crate::sites::Kind::Newapi { vec![Client::Claude, Client::ClaudeDesktop, Client::Codex, Client::Gemini] } else { clients_for(&group.platform) };
+    let allowed = match allowed_override {
+        Some(o) => o.to_vec(),
+        None if site.kind == crate::sites::Kind::Newapi => vec![Client::Claude, Client::ClaudeDesktop, Client::Codex, Client::Gemini],
+        None => clients_for(&group.platform),
+    };
     if !allowed.contains(&target) {
         return Err(if clients_for(&group.platform).is_empty() {
             format!("「{}」暂不支持一键配置（平台：{}）", group.name, group.platform)

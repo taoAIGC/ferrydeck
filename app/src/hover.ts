@@ -35,6 +35,7 @@ function showTip(target: HTMLElement) {
     document.body.append(tipEl); // 放在 #app 外面，界面重绘不会把它清掉
   }
   tipEl.textContent = text;
+  tipEl.classList.toggle("mono", target.dataset.tipMono !== undefined);
   tipEl.style.display = "block";
   const r = target.getBoundingClientRect();
   const w = tipEl.offsetWidth;
@@ -51,11 +52,14 @@ function showTip(target: HTMLElement) {
 export function syncHover(): void {
   const under = inside ? document.elementFromPoint(mx, my) : null;
 
-  const card = under?.closest(".card:not(.list-head), .site-card, .panel-row") ?? null;
-  document.querySelectorAll(".card.is-hover, .site-card.is-hover, .panel-row.is-hover").forEach((e) => {
-    if (e !== card) e.classList.remove("is-hover");
+  // 鼠标下面的元素的所有“悬停容器”祖先都算处于悬停（比如“…”菜单在分组行里面：两个都要亮，行里的启用按钮才不会消失）
+  const sel = ".card:not(.list-head), .site-card, .site-tab, .panel-row, .more";
+  const hovered: Element[] = [];
+  for (let e: Element | null = under; e; e = e.parentElement) if (e.matches(sel)) hovered.push(e);
+  document.querySelectorAll(".card.is-hover, .site-card.is-hover, .site-tab.is-hover, .panel-row.is-hover, .more.is-hover").forEach((e) => {
+    if (!hovered.includes(e)) e.classList.remove("is-hover");
   });
-  card?.classList.add("is-hover");
+  hovered.forEach((e) => e.classList.add("is-hover"));
 
   const tip = (under?.closest("[data-tip]") as HTMLElement | null) ?? null;
   if (!tip) {

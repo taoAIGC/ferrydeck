@@ -94,7 +94,39 @@ export function createMockBackend(): Backend {
       account: ok ? ({ display: d.kind === "sub2api" ? "demo@example.com" : "demo", balance: d.balance } as AccountInfo) : null,
       error: ok ? null : offline.has(url) ? "暂时无法连接站点（请求超时，请检查网络），稍后会自动重试" : "登录已过期，请重新登录",
       needs_login: !ok && !offline.has(url),
+      is_admin: admins.has(url),
     };
+  };
+  const admins = new Set<string>(has("admin") ? ["https://alpha.example.com", ...(has("sites2") ? ["https://beta.example.com"] : [])] : []);
+  // 站长视角的模拟数据（按站点地址保存，操作会真的改它）
+  const linkChoice = new Map<string, string>();
+  const addedSources = new Set<string>();
+  const clientOverrides = new Map<string, ClientId[]>();
+  const downRefs: import("./types").DownstreamRef[] = [];
+  const adminData = new Map<string, import("./types").AdminOverview>();
+  const adminOf = (url: string) => {
+    if (!adminData.has(url)) {
+      const alpha = SITE_DEFS[url].kind === "sub2api";
+      adminData.set(url, {
+        fetched_at: Math.floor(Date.now() / 1000),
+        downstreams: alpha
+          ? [
+              { id: "2", name: "Claude 官方系列高速", description: "官方直连，速度最快", platform: "anthropic", rate_multiplier: 2.5, status: "active", editable: true },
+              { id: "4", name: "Claude 逆向Kiro", description: "性价比高，适合日常编码", platform: "anthropic", rate_multiplier: 0.28, status: "active", editable: true },
+              { id: "12", name: "Claude 逆向Kiro - 特价", description: null, platform: "anthropic", rate_multiplier: 0.12, status: "active", editable: true },
+              { id: "99", name: "未绑定的分组", description: null, platform: "openai", rate_multiplier: 1, status: "active", editable: true },
+            ]
+          : [{ id: "GPT Pro", name: "GPT Pro", description: "GPT PRO 账号", platform: "", rate_multiplier: 0.258, status: "active", editable: true }],
+        upstreams: alpha
+          ? [
+              { id: "u1", name: "官方账号池 0.09", platform: "anthropic", kind: "apikey", status: "active", account_status: "active", schedulable: true, error: null, host: "api.up-one.com", groups: ["2", "4"], models: 12, model_names: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"], rate_multiplier: 1, priority: 50 },
+              { id: "u2", name: "备用上游 0.35", platform: "anthropic", kind: "apikey", status: "paused", account_status: "active", schedulable: false, error: null, host: "api.up-two.com", groups: ["4", "12"], models: 8, model_names: ["claude-sonnet-5-5", "claude-sonnet-5"], rate_multiplier: 0.5, priority: 60 },
+              { id: "u3", name: has("hint") ? "异常账号 0.7" : "异常账号", platform: "anthropic", kind: "oauth", status: "error", account_status: "error", schedulable: true, error: "401 invalid key", host: has("hint") ? "api.up-three.com" : null, groups: ["12"], models: 3, model_names: ["claude-haiku-5-5"], rate_multiplier: null, priority: null },
+            ]
+          : [{ id: "7", name: "渠道 A", platform: "", kind: "14", status: "active", account_status: "active", schedulable: null, error: null, host: "up.example.com", groups: ["GPT Pro"], models: 5, model_names: ["gpt-5.6-sol", "gpt-6-sol"], rate_multiplier: null, priority: 10 }],
+      });
+    }
+    return adminData.get(url)!;
   };
   const urlOf = (id: string) => urls.find((u) => siteId(u) === id);
   const normalize = (raw: string) => {
@@ -102,18 +134,17 @@ export function createMockBackend(): Backend {
     if (!s) throw new Error("请输入站点地址");
     if (!s.includes("://")) s = "https://" + s;
     const host = s.split("://")[1].split("/")[0].toLowerCase();
-    if (s.startsWith("http://") && !host.startsWith("localhost") && !host.startsWith("127.0.0.1")) throw new Error("出于安全考虑，只支持 https 站点（本机地址除外）");
-    return "https://" + host;
+    return (s.startsWith("http://") ? "http://" : "https://") + host;
   };
 
   return {
     async appVersion() {
-      return "0.4.0";
+      return "0.5.0";
     },
     async checkUpdate() {
       await delay();
       if (has("check-fail")) throw new Error("无法获取更新信息，请稍后再试");
-      return has("update") || has("update-fail") ? { version: "0.4.0", notes: "新增多站点支持" } : null;
+      return has("update") || has("update-fail") ? { version: "0.6.0", notes: "新增多站点支持" } : null;
     },
     async installUpdate() {
       await sleep(has("slow") ? 1500 : 300);
@@ -149,7 +180,7 @@ export function createMockBackend(): Backend {
       if (!d) throw new Error("无法识别该站点类型，目前支持 new-api 和 sub2api");
       return { base_url: base, kind: d.kind, name: base.split("://")[1] };
     },
-    async addSite({ baseUrl, name, username, password }) {
+    async addSite({ baseUrl, name, username, password, isAdmin }) {
       await delay();
       const base = normalize(baseUrl);
       const d = SITE_DEFS[base];
@@ -158,6 +189,8 @@ export function createMockBackend(): Backend {
       if (!urls.includes(base)) urls.push(base);
       connected.set(base, true);
       if (name?.trim()) customNames.set(base, name.trim());
+      if (isAdmin) admins.add(base);
+      ((window as unknown as { __addArgs?: unknown[] }).__addArgs ??= []).push({ baseUrl: base, isAdmin: !!isAdmin });
       return view(base);
     },
     async removeSite(id) {
@@ -181,11 +214,151 @@ export function createMockBackend(): Backend {
       }
       void siteId;
       return {
-        ...base, requests: 120, total_requests: 120, input_tokens: 600_000, output_tokens: 400_000, cache_creation_tokens: 100_000, cache_read_tokens: 300_000, effective_tokens: 1_000_000,
-        cost: 2, official_cost: 4, cost_per_m_effective: 2 + (Number(groupId) || 0) / 10, cache_hit_rate: 0.3 + (Number(groupId) || 0) / 100, actual_multiplier: 0.5, first_token_median_ms: has("realfrt") ? 820 : null, first_token_p90_ms: has("realfrt") ? 2100 : null, first_token_samples: has("realfrt") ? 40 : 0, avg_duration_ms: 3200,
+        ...base, requests: has("fewcalls") ? 30 : 120, total_requests: has("fewcalls") ? 30 : 120, input_tokens: 600_000, output_tokens: 400_000, cache_creation_tokens: 100_000, cache_read_tokens: 300_000, effective_tokens: 1_000_000,
+        tokens_24h: 500_000, cost_24h: 3, cost: 2, official_cost: 4, cost_per_m_effective: 2 + (Number(groupId) || 0) / 10, cache_hit_rate: 0.3 + (Number(groupId) || 0) / 100, actual_multiplier: 0.5, first_token_median_ms: has("realfrt") ? 820 : null, first_token_p90_ms: has("realfrt") ? 2100 : null, first_token_samples: has("realfrt") ? 40 : 0, avg_duration_ms: 3200,
         models: [{ model: "claude-sonnet-5-5", requests: 100, input_tokens: 500_000, output_tokens: 300_000, cache_creation_tokens: 90_000, cache_read_tokens: 250_000, cost: 1.8, cost_per_m_effective: 2.25 }, { model: "claude-haiku-5-5", requests: 20, input_tokens: 100_000, output_tokens: 100_000, cache_creation_tokens: 10_000, cache_read_tokens: 50_000, cost: 0.2, cost_per_m_effective: 1 }],
         estimates: [{ model: "claude-sonnet-5-5", input_per_m: 1.5, output_per_m: 7.5, cache_read_per_m: 0.15 }],
       };
+    },
+    async adminOverview(siteId) {
+      await delay();
+      const u = urlOf(siteId);
+      if (!u || !admins.has(u)) throw new Error("这个站点没有开启管理员模式");
+      if (has("adminfail")) throw new Error("站点限流了（429），请 30 秒后再试");
+      return JSON.parse(JSON.stringify(adminOf(u)));
+    },
+    async adminUsage(siteId, scope, id) {
+      await sleep(has("slow") ? 900 : 200);
+      ((window as unknown as { __adminUsageCalls?: string[] }).__adminUsageCalls ??= []).push(`${siteId}/${scope}/${id}`);
+      if (has("adminusage-fail")) throw new Error("站点限流了（429），请 30 秒后再试");
+      const base = { window_days: 7, currency: "$", nominal_multiplier: 1, sampled: false, sample_requests: 0, fetched_at: Math.floor(Date.now() / 1000), models: [], estimates: [], notes: [] as string[] };
+      if (id === "99" || id === "u3") return { ...base, requests: 0, total_requests: 0, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, effective_tokens: 0, cost: 0, official_cost: null, cost_per_m_effective: null, cache_hit_rate: null, actual_multiplier: null, first_token_median_ms: null, first_token_p90_ms: null, first_token_samples: 0, avg_duration_ms: null };
+      const up = scope === "account";
+      return { ...base, requests: id === "12" ? 30 : 400, total_requests: id === "12" ? 30 : 400, input_tokens: 600_000, output_tokens: 400_000, cache_creation_tokens: 0, cache_read_tokens: 300_000, effective_tokens: 1_000_000, cost: up ? 1.5 : 2.5, official_cost: 5, cost_per_m_effective: up ? 1.5 : 2.5, cache_hit_rate: 0.33, actual_multiplier: 0.5, tokens_24h: id === "2" ? 25_900_000 : id === "u1" ? 1_200_000 : 340_000, tokens_24h_capped: id === "4", cost_24h: (id === "2" ? 25_900_000 : id === "u1" ? 1_200_000 : 340_000) / 1e6 * 5, official_cost_24h: (id === "2" ? 25_900_000 : id === "u1" ? 1_200_000 : 340_000) / 1e6 * 10, first_token_median_ms: up ? 700 : 900, first_token_p90_ms: 1500, first_token_samples: 20, avg_duration_ms: 2000 };
+    },
+    async adminCreateGroup(siteId, group) {
+      await delay();
+      if (has("createfail")) throw new Error("已经有一个叫「" + group.name + "」的分组");
+      const d = adminOf(urlOf(siteId)!);
+      const id = `n${d.downstreams.length + 1}`;
+      d.downstreams.push({ id, name: group.name, description: group.description ?? null, platform: group.platform ?? "", rate_multiplier: group.rate_multiplier, status: "active", editable: true });
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`create-group:${group.name}:${group.platform ?? "-"}:${group.rate_multiplier}`);
+      return id;
+    },
+    async adminAddUpstream(siteId, downstreamId, upstreamSiteId, upstreamGroupId, name, paused, allowDuplicate, testModel) {
+      await sleep(has("slow") ? 900 : 300);
+      const dupKey = `${upstreamSiteId}|${upstreamGroupId}`;
+      if (addedSources.has(dupKey) && !allowDuplicate) throw new Error("这个上游分组已经添加过（上游账号「x」）：再添加一次会和它共用同一把上游 Key，两边的用户会互相占用它的并发和额度，需要确认后才能继续");
+      addedSources.add(dupKey);
+      if (has("addfail")) throw new Error("用这把 Key 在上游站点试了一次，没通：Insufficient account balance");
+      const d = adminOf(urlOf(siteId)!);
+      const up = { id: `a${d.upstreams.length + 1}`, name: name || `${upstreamSiteId}-${upstreamGroupId}`, platform: "anthropic", kind: "apikey", status: (paused ?? true ? "paused" : "active") as "paused" | "active", account_status: "active", schedulable: !(paused ?? true), error: null, host: `${upstreamSiteId}.example.com`, groups: [downstreamId], models: 4, model_names: ["claude-sonnet-5-5", "claude-haiku-5-5"], rate_multiplier: 0.28, priority: 50 };
+      d.upstreams.push(up);
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`add-upstream:${downstreamId}:${upstreamSiteId}:${upstreamGroupId}:${paused ?? true}${testModel ? `:model=${testModel}` : ""}`);
+      return { upstream_id: up.id, name: up.name, key_created: true, models: 4, probe_ms: 820, paused: paused ?? true };
+    },
+    async setGroupClients(siteId, groupId, clients) {
+      await delay();
+      if (clients.length) clientOverrides.set(`${siteId}|${groupId}`, clients);
+      else clientOverrides.delete(`${siteId}|${groupId}`);
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`clients:${siteId}:${groupId}:${clients.join(",") || "-"}`);
+    },
+    async sayHi(siteId, groupId, model, client) {
+      await sleep(has("slow") ? 900 : 250);
+      void siteId;
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`sayhi:${siteId}:${groupId}:${model ?? "-"}:${client ?? "-"}`);
+      if (has("sayhifail")) throw new Error("Insufficient account balance");
+      return { model: model ?? "claude-sonnet-5-5", reply: "你好！有什么我可以帮你的吗？", first_ms: 640, total_ms: 1180, input_tokens: 9 };
+    },
+    async adminCreateDownstream(siteId, upstreamSiteId, upstreamGroupId, name, platform, rate, description, paused, testModel) {
+      await sleep(has("slow") ? 900 : 300);
+      if (has("downfail")) throw new Error("下游分组「" + name + "」已经创建，但添加上游失败：用这把 Key 在上游站点试了一次，没通：Insufficient account balance");
+      const url = urlOf(siteId)!;
+      const d = adminOf(url);
+      const id = `m${d.downstreams.length + 1}`;
+      d.downstreams.push({ id, name, description: description ?? null, platform: platform ?? "", rate_multiplier: rate, status: "active", editable: true });
+      const upId = `a${d.upstreams.length + 1}`;
+      d.upstreams.push({ id: upId, name: `${upstreamSiteId}-${upstreamGroupId}`, platform: platform ?? "", kind: "apikey", status: paused ? "paused" : "active", account_status: "active", schedulable: !paused, error: null, host: `${upstreamSiteId}.example.com`, groups: [id], models: 4, model_names: ["claude-sonnet-5-5"], rate_multiplier: 0.28, priority: 50 });
+      downRefs.push({ up_site_id: upstreamSiteId, up_group_id: upstreamGroupId, site_id: siteId, site_name: SITE_DEFS[url].name, group_id: id, group_name: name, rate });
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`create-downstream:${siteId}:${upstreamSiteId}:${upstreamGroupId}:${name}:${platform ?? "-"}:${rate}:${description ?? ""}:${paused}${testModel ? `:model=${testModel}` : ""}`);
+      return { group_id: id, added: { upstream_id: upId, name: `${upstreamSiteId}-${upstreamGroupId}`, key_created: true, models: 4, probe_ms: 820, paused } };
+    },
+    async adminDownstreams() {
+      await delay();
+      return downRefs.map((r) => ({ ...r }));
+    },
+    async adminReplaceUpstream(siteId, upstreamId, upstreamSiteId, upstreamGroupId, name, testModel) {
+      await sleep(has("slow") ? 900 : 300);
+      if (has("replacefail")) throw new Error("用这把 Key 在上游站点试了一次，没通：Insufficient account balance");
+      const up = adminOf(urlOf(siteId)!).upstreams.find((x) => x.id === upstreamId);
+      if (!up) throw new Error("上游账号不存在");
+      up.host = `${upstreamSiteId}.example.com`;
+      up.models = 6;
+      if (name) up.name = name;
+      linkChoice.set(upstreamId, upstreamGroupId);
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`replace:${upstreamId}:${upstreamSiteId}:${upstreamGroupId}:${name ?? "-"}${testModel ? `:model=${testModel}` : ""}`);
+      return { upstream_id: upstreamId, name: up.name, key_created: false, models: 6, probe_ms: 700, paused: up.status === "paused" };
+    },
+    async adminSetAccountState(siteId, upstreamId, status, schedulable) {
+      await delay();
+      const up = adminOf(urlOf(siteId)!).upstreams.find((x) => x.id === upstreamId);
+      if (!up) throw new Error("上游不存在");
+      if (status) up.account_status = status;
+      if (schedulable !== undefined) up.schedulable = schedulable;
+      up.status = up.account_status === "error" ? "error" : up.account_status === "inactive" || up.schedulable === false ? "paused" : "active";
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`state:${upstreamId}:${status ?? "-"}:${schedulable === undefined ? "-" : schedulable}`);
+    },
+    async adminRemoveGroup(siteId, groupId) {
+      await delay();
+      if (has("rmgroupfail")) throw new Error("该分组下还有用户的 Key，不能删除");
+      const d = adminOf(urlOf(siteId)!);
+      d.downstreams = d.downstreams.filter((x) => x.id !== groupId);
+      d.upstreams.forEach((u) => (u.groups = u.groups.filter((g) => g !== groupId)));
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`remove-group:${groupId}`);
+    },
+    async adminLinks(siteId) {
+      await delay();
+      if (!admins.has(urlOf(siteId)!)) throw new Error("这个站点没有开启管理员模式");
+      const choices = [{ id: "g1", name: "Kiro-特价", rate: 0.09 }, { id: "g2", name: "Kiro-正价", rate: 0.5 }, { id: "g3", name: "GPT-Pro", rate: 0.26 }, { id: "Claude 逆向Kiro", name: "Claude 逆向Kiro", rate: 0.3 }, { id: "GPT Pro", name: "GPT Pro", rate: 0.258 }];
+      const mk = (id: string, host: string, name: string) => {
+        const sel = linkChoice.get(id);
+        const g = choices.find((c) => c.id === sel);
+        const hint = name.match(/(\d+(?:\.\d+)?)$/);
+        const sug = !g && hint ? choices.filter((c) => c.rate === Number(hint[1])) : [];
+        return { upstream_id: id, host, site_id: "beta", site_name: "Beta", group_id: g?.id ?? null, group: g?.name ?? null, rate: g?.rate ?? null, suggested: sug.length === 1 ? sug[0] : null, candidates: choices, note: null };
+      };
+      return { links: [mk("u1", "api.up-one.com", "官方账号池 0.09"), mk("u2", "api.up-one.com", "备用上游 0.35")], missing_hosts: has("alllinked") ? [] : ["api.up-two.com"] };
+    },
+    async adminSetLink(siteId, upstreamId, linkSiteId, groupId) {
+      await delay();
+      void siteId;
+      if (groupId && linkSiteId) linkChoice.set(upstreamId, groupId);
+      else linkChoice.delete(upstreamId);
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`link:${upstreamId}:${groupId ?? "-"}`);
+    },
+    async adminSetPaused(siteId, upstreamId, paused) {
+      await delay();
+      const up = adminOf(urlOf(siteId)!).upstreams.find((x) => x.id === upstreamId);
+      if (!up) throw new Error("上游不存在");
+      up.status = paused ? "paused" : "active";
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`${paused ? "pause" : "resume"}:${upstreamId}`);
+    },
+    async adminRemoveUpstream(siteId, upstreamId) {
+      await delay();
+      const d = adminOf(urlOf(siteId)!);
+      d.upstreams = d.upstreams.filter((x) => x.id !== upstreamId);
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`remove:${upstreamId}`);
+    },
+    async adminUpdateGroup(siteId, groupId, edit) {
+      await delay();
+      if (has("adminedit-fail")) throw new Error("站点拒绝了这次修改");
+      const gr = adminOf(urlOf(siteId)!).downstreams.find((x) => x.id === groupId);
+      if (!gr) throw new Error("分组不存在");
+      if (edit.name !== undefined) gr.name = edit.name;
+      if (edit.description !== undefined) gr.description = edit.description || null;
+      if (edit.platform !== undefined) gr.platform = edit.platform;
+      if (edit.rate_multiplier !== undefined) gr.rate_multiplier = edit.rate_multiplier;
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`edit:${groupId}:${JSON.stringify(edit)}`);
     },
     async probeGroup(siteId, groupId) {
       // 测试用：记录实际向“站点”发了几次、发给哪个站点
@@ -221,7 +394,7 @@ export function createMockBackend(): Backend {
       for (const u of urls) {
         if (!connected.get(u) || offline.has(u)) continue;
         const v = view(u);
-        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, models: x.models ?? (has("plaza") ? (SITE_DEFS[u].kind === "sub2api" ? (x.clients.length > 0 ? MODELS[x.clients[0]] : []) : ["beta-only-model", "claude-sonnet-5-5"]) : []), clients_inferred: x.clients_inferred ?? SITE_DEFS[u].kind === "newapi", site_id: v.id, site_name: v.name })));
+        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, models: x.models ?? (has("plaza") ? (SITE_DEFS[u].kind === "sub2api" ? (x.clients.length > 0 ? MODELS[x.clients[0]] : []) : ["beta-only-model", "claude-sonnet-5-5"]) : []), clients_inferred: x.clients_inferred ?? SITE_DEFS[u].kind === "newapi", site_id: v.id, site_name: v.name, clients: clientOverrides.get(`${v.id}|${x.id}`) ?? x.clients })));
       }
       return { groups, sites: urls.map(view), fetched_at: lastFetch };
     },

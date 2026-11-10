@@ -30,7 +30,7 @@ fn grp(platform: &str, models: &[&str]) -> GroupInfo {
 async fn connect(s: &MockServer) -> (SiteClient, Site) {
     let c = SiteClient::new(Kind::Newapi, &s.uri(), Arc::new(|_| {}));
     c.login("u", "p").await.unwrap();
-    let site = Site { id: "site1".into(), kind: Kind::Newapi, name: "我的站点".into(), base_url: s.uri() };
+    let site = Site { id: "site1".into(), kind: Kind::Newapi, name: "我的站点".into(), base_url: s.uri(), is_admin: false };
     (c, site)
 }
 
@@ -148,4 +148,21 @@ async fn a_requested_model_the_group_does_not_have_is_rejected() {
     let root = TempDir::new().unwrap();
     let e = service::enable(&c, &site, &Paths::under(root.path()), &grp("anthropic", &[]), Client::Claude, Some("nope".into())).await.unwrap_err();
     assert_eq!(e, "该分组没有模型 nope");
+}
+
+#[tokio::test]
+async fn a_manual_client_override_replaces_the_platform_based_check() {
+    let s = fake_newapi(&["gpt-5.6-sol", "gpt-6-sol"]).await;
+    let (c, mut site) = connect(&s).await;
+    site.kind = Kind::Sub2api; // sub2api 的分组按平台分类：anthropic 的分组默认只能配 Claude
+    let root = TempDir::new().unwrap();
+    let paths = Paths::under(root.path());
+    let g = grp("anthropic", &[]);
+    let e = service::enable(&c, &site, &paths, &g, Client::Codex, None).await.unwrap_err();
+    assert!(e.contains("不能配置到"), "{e}");
+    // 用户手动把这个分组设成支持 Codex 之后可以配
+    service::enable_with(&c, &site, &paths, &g, Client::Codex, None, Some(&[Client::Claude, Client::Codex])).await.unwrap();
+    assert!(paths.codex.join("config.toml").exists());
+    // 没在手动列表里的客户端仍然拒绝
+    assert!(service::enable_with(&c, &site, &paths, &g, Client::Gemini, None, Some(&[Client::Claude, Client::Codex])).await.is_err());
 }

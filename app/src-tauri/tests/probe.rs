@@ -89,3 +89,28 @@ fn input_tokens_are_read_from_each_wire_format() {
     assert_eq!(f(&json!({"usageMetadata": {"promptTokenCount": 3}})), Some(3));
     assert_eq!(f(&json!({"choices": []})), None);
 }
+
+#[tokio::test]
+async fn models_that_cannot_be_listed_come_with_the_sites_reason() {
+    let site = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/v1/models")).respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({"code": "INSUFFICIENT_BALANCE", "message": "Insufficient account balance"}))).mount(&site).await;
+    let http = Http::new(&site.uri());
+    assert_eq!(http.models_for_key_result("sk").await.unwrap_err(), "Insufficient account balance", "余额不足要把原因带出来");
+    assert!(http.models_for_key("sk").await.is_empty(), "旧接口行为不变：读不到就是空");
+}
+
+#[tokio::test]
+async fn sayhi_returns_the_models_reply_text_and_honors_the_token_limit() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/v1/messages")).respond_with(sse(&[r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好！"}}"#, r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"有什么可以帮你？"}}"#])).mount(&s).await;
+    let h = Http::new(&s.uri());
+    let p = h.probe_with("sk-x", "claude-sonnet-5-5", ProbeWire::Anthropic, 80).await.unwrap();
+    assert_eq!(p.text, "你好！有什么可以帮你？");
+    let reqs = s.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body["max_tokens"], 80, "sayhi 允许多回一些");
+    // 普通测速仍是 16
+    h.probe("sk-x", "claude-sonnet-5-5", ProbeWire::Anthropic).await.unwrap();
+    let body2: serde_json::Value = serde_json::from_slice(&s.received_requests().await.unwrap()[1].body).unwrap();
+    assert_eq!(body2["max_tokens"], 16);
+}

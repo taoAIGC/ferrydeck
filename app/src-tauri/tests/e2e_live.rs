@@ -56,7 +56,7 @@ async fn send_retry(mk: impl Fn() -> reqwest::RequestBuilder) -> reqwest::Respon
 
 async fn run_site(kind: Kind, base: &str, user: &str, pw: &str) {
     let client = Arc::new(SiteClient::new(kind, base, Arc::new(|_| {})));
-    let site = Site { id: "e2e".into(), kind, name: "e2e".into(), base_url: base.into() };
+    let site = Site { id: "e2e".into(), kind, name: "e2e".into(), base_url: base.into(), is_admin: false };
     let root = tempfile::TempDir::new().unwrap();
     let paths = Paths::under(root.path());
     let originals = seed(&paths);

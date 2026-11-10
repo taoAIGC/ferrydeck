@@ -245,21 +245,25 @@ impl Http {
     /// 限制输出长度（最多 16 个 token），读到流结束，这样能拿到站点报告的输入 token 数（“hi”本身只有几个 token，
     /// 多出来的部分是站点悄悄加的系统提示，用来衡量空请求的基线开销）。费用可以忽略。
     pub async fn probe(&self, key: &str, model: &str, wire: ProbeWire) -> Result<super::Probe, String> {
+        self.probe_with(key, model, wire, 16).await
+    }
+
+    pub async fn probe_with(&self, key: &str, model: &str, wire: ProbeWire, max_tokens: u32) -> Result<super::Probe, String> {
         let started = std::time::Instant::now();
         let msgs = serde_json::json!([{ "role": "user", "content": "hi" }]);
         let (path, body) = match wire {
-            ProbeWire::Anthropic => ("/v1/messages".to_string(), serde_json::json!({ "model": model, "messages": msgs, "max_tokens": 16, "stream": true })),
-            ProbeWire::Responses => ("/v1/responses".to_string(), serde_json::json!({ "model": model, "input": msgs, "max_output_tokens": 16, "stream": true })),
+            ProbeWire::Anthropic => ("/v1/messages".to_string(), serde_json::json!({ "model": model, "messages": msgs, "max_tokens": max_tokens, "stream": true })),
+            ProbeWire::Responses => ("/v1/responses".to_string(), serde_json::json!({ "model": model, "input": msgs, "max_output_tokens": max_tokens, "stream": true })),
             ProbeWire::Gemini => (
                 format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
                 // 思考型模型会先“想”一会儿，留得太小会一个字都不输出
-                serde_json::json!({ "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }], "generationConfig": { "maxOutputTokens": 64 } }),
+                serde_json::json!({ "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }], "generationConfig": { "maxOutputTokens": max_tokens.max(64) } }),
             ),
             ProbeWire::Chat => {
                 // gpt-5 / o 系列只认 max_completion_tokens，其他模型认 max_tokens
                 let new_style = model.starts_with("gpt-5") || (model.starts_with('o') && model.chars().nth(1).is_some_and(|c| c.is_ascii_digit()));
                 let limit = if new_style { "max_completion_tokens" } else { "max_tokens" };
-                ("/v1/chat/completions".to_string(), serde_json::json!({ "model": model, "messages": msgs, limit: 16, "stream": true }))
+                ("/v1/chat/completions".to_string(), serde_json::json!({ "model": model, "messages": msgs, limit: max_tokens, "stream": true }))
             }
         };
         let mut rq = self.client.post(format!("{}{}", self.base, path)).bearer_auth(key).json(&body);
@@ -284,6 +288,7 @@ impl Http {
         }
         let mut first: Option<u64> = None;
         let mut chars = 0usize;
+        let mut reply = String::new();
         let mut input_tokens: Option<u64> = None;
         let mut buf = String::new();
         while let Some(chunk) = resp.chunk().await.map_err(|e| if e.is_timeout() { "等待回复超时".to_string() } else { format!("网络错误: {e}") })? {
@@ -302,30 +307,48 @@ impl Http {
                 let text = delta_text(&v);
                 if !text.is_empty() {
                     chars += text.chars().count();
+                    if reply.chars().count() < 400 {
+                        reply.push_str(&text);
+                    }
                     first.get_or_insert(started.elapsed().as_millis() as u64);
                 }
             }
         }
         let first_ms = first.ok_or("没有收到任何回复内容（该模型可能不支持流式输出）")?;
-        Ok(super::Probe { first_ms, total_ms: started.elapsed().as_millis() as u64, chars, input_tokens })
+        Ok(super::Probe { first_ms, total_ms: started.elapsed().as_millis() as u64, chars, input_tokens, text: reply })
     }
 
     /// 查询某个 Key 能用的模型：OpenAI 风格 `/v1/models`，失败再试 Gemini 风格。
     pub async fn models_for_key(&self, key: &str) -> Vec<String> {
+        self.models_for_key_result(key).await.unwrap_or_default()
+    }
+
+    /// 同上，但读不到时带上站点的原话（比如余额不足时 `/v1/models` 会直接返回 403），好告诉用户为什么没有模型。
+    pub async fn models_for_key_result(&self, key: &str) -> Result<Vec<String>, String> {
+        let mut why: Option<String> = None;
         if let Ok(r) = self.send(Method::GET, "/v1/models", Some(key), None, &[], None).await {
+            if !r.status.is_success() {
+                why = message_of(&r.body).or_else(|| r.body.pointer("/error/message").and_then(Value::as_str).map(String::from)).or_else(|| Some(format!("站点返回 HTTP {}", r.status.as_u16())));
+            }
             if r.status.is_success() {
                 let ids: Vec<String> = r.body.get("data").and_then(Value::as_array).map(|a| a.iter().filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from)).collect()).unwrap_or_default();
                 if !ids.is_empty() {
-                    return ids;
+                    return Ok(ids);
                 }
             }
         }
         if let Ok(r) = self.send(Method::GET, "/v1beta/models", None, None, &[("x-goog-api-key", key.to_string())], None).await {
             if r.status.is_success() {
-                return r.body.get("models").and_then(Value::as_array).map(|a| a.iter().filter_map(|m| m.get("name").and_then(Value::as_str).map(|n| n.trim_start_matches("models/").to_string())).collect()).unwrap_or_default();
+                let ms: Vec<String> = r.body.get("models").and_then(Value::as_array).map(|a| a.iter().filter_map(|m| m.get("name").and_then(Value::as_str).map(|n| n.trim_start_matches("models/").to_string())).collect()).unwrap_or_default();
+                if !ms.is_empty() {
+                    return Ok(ms);
+                }
             }
         }
-        vec![]
+        match why {
+            Some(e) => Err(e),
+            None => Ok(vec![]),
+        }
     }
 }
 

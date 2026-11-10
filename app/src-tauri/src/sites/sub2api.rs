@@ -272,19 +272,52 @@ impl Client {
             Err(e) => u.notes.push(format!("没有拿到按模型的统计：{e}")),
         }
 
-        // 3) 最近的请求：取真实的首字时延（只有流式请求才有）
-        if u.requests > 0 {
-            match self.call(Method::GET, &format!("/api/v1/usage?group_id={gid}&page=1&page_size=100&sort_by=created_at&sort_order=desc"), None).await {
-                Ok(d) => {
-                    let samples: Vec<u64> = d
-                        .get("items")
-                        .and_then(Value::as_array)
-                        .map(|a| a.iter().filter_map(|r| r.get("first_token_ms").and_then(Value::as_i64)).filter(|ms| *ms > 0).map(|ms| ms as u64).collect())
-                        .unwrap_or_default();
-                    (u.first_token_median_ms, u.first_token_p90_ms, u.first_token_samples) = latency_summary(samples);
+        // 3) 最近的请求（时间倒序翻页，最多 5 页）：取真实的首字时延（只有流式请求才有，取最新 50 条），并累加过去 24 小时的实付和 Token 量
+        if u.requests == 0 {
+            u.tokens_24h = Some(0);
+            u.cost_24h = Some(0.0);
+        } else {
+            let cutoff = now() - 86_400;
+            let (mut samples, mut seen, mut paid24, mut tokens, mut capped) = (Vec::<u64>::new(), 0usize, 0f64, 0i64, false);
+            let mut failed = false;
+            'pages: for page in 1..=5 {
+                match self.call(Method::GET, &format!("/api/v1/usage?group_id={gid}&page={page}&page_size=100&sort_by=created_at&sort_order=desc"), None).await {
+                    Ok(d) => {
+                        let items = d.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                        for r in &items {
+                            let at = r.get("created_at").and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).unwrap_or(0);
+                            if at >= cutoff {
+                                let t = |k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
+                                paid24 += r.get("actual_cost").and_then(Value::as_f64).unwrap_or(0.0);
+                                tokens += t("input_tokens") + t("output_tokens") + t("cache_creation_tokens") + t("cache_read_tokens");
+                            } else if seen >= 50 {
+                                break 'pages;
+                            }
+                            if seen < 50 {
+                                if let Some(ms) = r.get("first_token_ms").and_then(Value::as_i64).filter(|m| *m > 0) {
+                                    samples.push(ms as u64);
+                                }
+                            }
+                            seen += 1;
+                        }
+                        if items.len() < 100 {
+                            break;
+                        }
+                        capped = page == 5 && items.last().and_then(|r| r.get("created_at")).and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).is_some_and(|at| at >= cutoff);
+                    }
+                    Err(e) => {
+                        u.notes.push(format!("没有拿到真实首字时延和 24 小时流水：{e}"));
+                        failed = true;
+                        break;
+                    }
                 }
-                Err(e) => u.notes.push(format!("没有拿到真实首字时延：{e}")),
             }
+            if !failed {
+                u.cost_24h = Some(paid24);
+                u.tokens_24h = Some(tokens);
+                u.tokens_24h_capped = capped;
+            }
+            (u.first_token_median_ms, u.first_token_p90_ms, u.first_token_samples) = latency_summary(samples);
         }
 
         // 4) 模型广场里的定价，换算成“官方价 × 倍率”的预估（没开广场就没有，不算错误）
@@ -353,6 +386,10 @@ impl Client {
         self.http.models_for_key(key).await
     }
 
+    pub async fn models_result(&self, key: &str) -> Result<Vec<String>, String> {
+        self.http.models_for_key_result(key).await
+    }
+
     pub fn topup_url(&self) -> String {
         format!("{}/purchase", self.http.base)
     }
@@ -379,4 +416,268 @@ fn plaza_estimates(plaza: &Value, group_id: i64, fallback_multiplier: f64) -> Ve
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ---------- 站长：上下游一体管理 ----------
+
+fn id_string(v: &Value) -> Option<String> {
+    v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(String::from))
+}
+
+/// 把站点返回的一个账号整理成 `Upstream`。凭据（`credentials` 里的 Key、令牌）只取地址主机名和模型数量，其余丢弃。
+fn parse_upstream(a: &Value) -> Option<crate::admin::Upstream> {
+    let id = id_string(a.get("id")?)?;
+    let status_raw = a.get("status").and_then(Value::as_str).unwrap_or("active");
+    let schedulable = a.get("schedulable").and_then(Value::as_bool).unwrap_or(true);
+    let error = a.get("error_message").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+    let status = if status_raw == "error" {
+        "error"
+    } else if status_raw == "inactive" || !schedulable {
+        "paused"
+    } else {
+        "active"
+    };
+    let groups: Vec<String> = a
+        .get("group_ids")
+        .and_then(Value::as_array)
+        .map(|g| g.iter().filter_map(id_string).collect())
+        .or_else(|| a.get("groups").and_then(Value::as_array).map(|g| g.iter().filter_map(|x| x.get("id").and_then(id_string)).collect()))
+        .unwrap_or_default();
+    let cred = a.get("credentials");
+    Some(crate::admin::Upstream {
+        id,
+        name: a.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        platform: a.get("platform").and_then(Value::as_str).unwrap_or("").to_string(),
+        kind: a.get("type").and_then(Value::as_str).unwrap_or("").to_string(),
+        status: status.into(),
+        account_status: status_raw.to_string(),
+        schedulable: Some(schedulable),
+        error: if status == "error" { Some(error.map(|e| crate::admin::tidy_error(&e)).unwrap_or_else(|| "站点把这个账号标为异常".into())) } else { None },
+        host: cred.and_then(|c| c.get("base_url")).and_then(Value::as_str).and_then(crate::admin::host_of),
+        groups,
+        models: cred.and_then(|c| c.get("model_mapping")).and_then(Value::as_object).map(|m| m.len()).unwrap_or(0),
+        model_names: {
+            let mut v: Vec<String> = cred.and_then(|c| c.get("model_mapping")).and_then(Value::as_object).map(|m| m.keys().filter(|k| !k.contains('*')).cloned().collect()).unwrap_or_default();
+            v.sort();
+            v
+        },
+        rate_multiplier: a.get("rate_multiplier").and_then(Value::as_f64),
+        priority: a.get("priority").and_then(Value::as_i64),
+    })
+}
+
+impl Client {
+    /// 当前登录的账号是不是管理员：管理接口对普通账号会返回 403。
+    pub async fn admin_probe(&self) -> Result<(), String> {
+        self.call(Method::GET, "/api/v1/admin/groups/all", None).await.map(|_| ()).map_err(|e| { let l = e.to_lowercase(); if l.contains("admin") || l.contains("forbidden") || l.contains("permission") || e.contains("权限") || e.contains("HTTP 403") { "该账号不是这个站点的管理员".to_string() } else { e } })
+    }
+
+    pub async fn admin_overview(&self) -> Result<crate::admin::AdminOverview, String> {
+        let g = self.call(Method::GET, "/api/v1/admin/groups/all", None).await?;
+        let downstreams = g
+            .as_array()
+            .or_else(|| g.get("items").and_then(Value::as_array))
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        Some(crate::admin::Downstream {
+                            id: id_string(x.get("id")?)?,
+                            name: x.get("name").and_then(Value::as_str)?.to_string(),
+                            description: x.get("description").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from),
+                            platform: x.get("platform").and_then(Value::as_str).unwrap_or("").to_string(),
+                            rate_multiplier: x.get("rate_multiplier").and_then(Value::as_f64).unwrap_or(1.0),
+                            status: x.get("status").and_then(Value::as_str).unwrap_or("active").to_string(),
+                            editable: true,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut upstreams = vec![];
+        for page in 1..=20 {
+            let d = self.call(Method::GET, &format!("/api/v1/admin/accounts?page={page}&page_size=200"), None).await?;
+            let items = d.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            let n = items.len();
+            upstreams.extend(items.iter().filter_map(parse_upstream));
+            let total = d.get("total").and_then(Value::as_u64).map(|t| t as usize);
+            if n < 200 || total.is_some_and(|t| upstreams.len() >= t) {
+                break;
+            }
+        }
+        Ok(crate::admin::AdminOverview { upstreams, downstreams, fetched_at: now() })
+    }
+
+    /// 暂停 / 恢复一个上游账号（只改“是否参与调度”，不动凭据和分组绑定，随时可恢复）。
+    pub async fn admin_set_paused(&self, id: &str, paused: bool) -> Result<(), String> {
+        self.call(Method::POST, &format!("/api/v1/admin/accounts/{id}/schedulable"), Some(json!({ "schedulable": !paused }))).await.map(|_| ())
+    }
+
+    /// 移除（删除）一个上游账号。不可恢复。
+    pub async fn admin_remove_upstream(&self, id: &str) -> Result<(), String> {
+        self.call(Method::DELETE, &format!("/api/v1/admin/accounts/{id}"), None).await.map(|_| ())
+    }
+
+    pub async fn admin_update_group(&self, id: &str, edit: &crate::admin::GroupEdit) -> Result<(), String> {
+        edit.validate()?;
+        let mut body = serde_json::Map::new();
+        if let Some(n) = &edit.name {
+            body.insert("name".into(), json!(n.trim()));
+        }
+        if let Some(d) = &edit.description {
+            body.insert("description".into(), json!(d));
+        }
+        if let Some(p) = &edit.platform {
+            body.insert("platform".into(), json!(p));
+        }
+        if let Some(r) = edit.rate_multiplier {
+            body.insert("rate_multiplier".into(), json!(r));
+        }
+        self.call(Method::PUT, &format!("/api/v1/admin/groups/{id}"), Some(Value::Object(body))).await.map(|_| ())
+    }
+}
+
+impl Client {
+    /// 站长视角的近 7 天用量：`scope` 是 `group`（下游分组，花费 = 所有用户实付，即收入）或 `account`（上游账号，花费 = 你付给上游的成本）。
+    /// 用管理端的 `/admin/usage/stats` 和 `/admin/usage`：可以按分组 / 账号筛选，不受“这个账号自己能用哪些分组”的限制。
+    pub async fn admin_usage(&self, scope: &str, id: &str) -> Result<GroupUsage, String> {
+        id.parse::<i64>().map_err(|_| "id 不正确".to_string())?;
+        let key = if scope == "account" { "account_id" } else { "group_id" };
+        let end = now();
+        let q = format!("{key}={id}&start_date={}&end_date={}", crate::admin::ymd(end - WINDOW_DAYS as i64 * 86_400), crate::admin::ymd(end));
+        let mut u = GroupUsage { window_days: WINDOW_DAYS, currency: "$".into(), fetched_at: now(), ..Default::default() };
+        let s = self.call(Method::GET, &format!("/api/v1/admin/usage/stats?{q}"), None).await?;
+        let n = |k: &str| s.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let f = |k: &str| s.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        u.requests = n("total_requests");
+        u.total_requests = u.requests;
+        u.input_tokens = n("total_input_tokens");
+        u.output_tokens = n("total_output_tokens");
+        u.cache_creation_tokens = n("total_cache_creation_tokens");
+        u.cache_read_tokens = n("total_cache_read_tokens");
+        u.cost = if scope == "account" { f("total_account_cost") } else { f("total_actual_cost") };
+        u.official_cost = Some(f("total_cost"));
+        u.avg_duration_ms = s.get("average_duration_ms").and_then(Value::as_f64).filter(|v| *v > 0.0);
+        if u.requests == 0 {
+            u.tokens_24h = Some(0);
+            u.cost_24h = Some(0.0);
+            u.official_cost_24h = Some(0.0);
+        } else {
+            // 按时间倒序翻页（窗口和统计一样是 7 天）：最新的 50 条用来取首字时延；24 小时内的记录累加 Token 量。
+            // 翻到“已经过了 24 小时、首字样本也够 50 条”就停；最多 5 页，24 小时内的记录翻满了就标记“只统计了一部分”。
+            let cutoff = end - 86_400;
+            let lq = format!("{key}={id}&start_date={}&end_date={}", crate::admin::ymd(end - WINDOW_DAYS as i64 * 86_400 - 86_400), crate::admin::ymd(end + 86_400));
+            let (mut tokens, mut samples, mut seen, mut capped) = (0i64, Vec::<u64>::new(), 0usize, false);
+            let (mut paid24, mut official24) = (0f64, 0f64);
+            'pages: for page in 1..=5 {
+                match self.call(Method::GET, &format!("/api/v1/admin/usage?{lq}&page={page}&page_size=100&sort_by=created_at&sort_order=desc"), None).await {
+                    Ok(d) => {
+                        let items = d.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                        for r in &items {
+                            let at = r.get("created_at").and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).unwrap_or(0);
+                            if at >= cutoff {
+                                let t = |k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
+                                paid24 += r.get("actual_cost").and_then(Value::as_f64).unwrap_or(0.0);
+                                official24 += r.get("total_cost").and_then(Value::as_f64).unwrap_or(0.0);
+                                tokens += t("input_tokens") + t("output_tokens") + t("cache_creation_tokens") + t("cache_read_tokens");
+                            } else if seen >= 50 {
+                                break 'pages; // 24 小时的已经算完，首字样本也够了
+                            }
+                            if seen < 50 {
+                                if let Some(ms) = r.get("first_token_ms").and_then(Value::as_i64).filter(|m| *m > 0) {
+                                    samples.push(ms as u64);
+                                }
+                            }
+                            seen += 1;
+                        }
+                        if items.len() < 100 {
+                            break;
+                        }
+                        capped = page == 5 && items.last().and_then(|r| r.get("created_at")).and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).is_some_and(|at| at >= cutoff);
+                    }
+                    Err(e) => {
+                        u.notes.push(format!("没有拿到真实首字时延和 24 小时 Token 量：{e}"));
+                        break;
+                    }
+                }
+            }
+            if u.notes.is_empty() {
+                u.tokens_24h = Some(tokens);
+                u.tokens_24h_capped = capped;
+                u.cost_24h = Some(paid24);
+                u.official_cost_24h = Some(official24);
+            }
+            (u.first_token_median_ms, u.first_token_p90_ms, u.first_token_samples) = latency_summary(samples);
+        }
+        u.finish();
+        Ok(u)
+    }
+}
+
+impl Client {
+    /// 新建下游分组（站点里已有同名分组就拒绝）。返回新分组的 id。
+    pub async fn admin_create_group(&self, g: &crate::admin::NewGroup) -> Result<String, String> {
+        g.validate()?;
+        let existing = self.call(Method::GET, "/api/v1/admin/groups/all", None).await?;
+        let exists = existing.as_array().or_else(|| existing.get("items").and_then(Value::as_array)).is_some_and(|a| a.iter().any(|x| x.get("name").and_then(Value::as_str) == Some(g.name.trim())));
+        if exists {
+            return Err(format!("已经有一个叫「{}」的分组", g.name.trim()));
+        }
+        let platform = g.platform.clone().filter(|p| !p.is_empty()).ok_or("请选择分类（决定适用于哪个客户端）")?;
+        let body = json!({ "name": g.name.trim(), "description": g.description.clone().unwrap_or_default(), "platform": platform, "rate_multiplier": g.rate_multiplier });
+        let d = self.call(Method::POST, "/api/v1/admin/groups", Some(body)).await?;
+        d.get("id").and_then(id_string).ok_or_else(|| "站点没有返回新分组的 id".to_string())
+    }
+
+    /// 新建一个 API Key 类型的上游账号并绑定到下游分组。字段和站点自己的迁移脚本一致。返回账号 id。
+    pub async fn admin_create_upstream(&self, u: &crate::admin::NewUpstream) -> Result<String, String> {
+        let group_ids: Vec<i64> = u.group_ids.iter().map(|g| g.parse::<i64>().map_err(|_| "下游分组 id 不正确".to_string())).collect::<Result<_, _>>()?;
+        let mapping: serde_json::Map<String, Value> = u.models.iter().filter(|m| !m.contains('*')).map(|m| (m.clone(), json!(m))).collect();
+        let mut creds = json!({ "base_url": crate::admin::sub2api_base_url(&u.platform, &u.base_url), "api_key": u.api_key });
+        if !mapping.is_empty() {
+            creds["model_mapping"] = Value::Object(mapping);
+        }
+        let mut body = json!({
+            "name": u.name, "notes": "由 Ferrydeck 创建", "platform": u.platform, "type": "apikey", "credentials": creds,
+            "concurrency": 10, "priority": 50, "group_ids": group_ids, "confirm_mixed_channel_risk": true,
+        });
+        if let Some(r) = u.rate_multiplier {
+            body["rate_multiplier"] = json!(r);
+        }
+        let d = self.call(Method::POST, "/api/v1/admin/accounts", Some(body)).await?;
+        d.get("id").and_then(id_string).ok_or_else(|| "站点没有返回新账号的 id".to_string())
+    }
+}
+
+impl Client {
+    /// 删除下游分组。站点上这个分组下还有用户的 Key、订阅等时会拒绝，原话返回给界面。
+    pub async fn admin_remove_group(&self, id: &str) -> Result<(), String> {
+        id.parse::<i64>().map_err(|_| "分组 id 不正确".to_string())?;
+        self.call(Method::DELETE, &format!("/api/v1/admin/groups/{id}"), None).await.map(|_| ())
+    }
+
+    /// 就地更换一个上游账号的来源（地址、Key、模型）：账号 id、名称、状态、绑定的下游分组都不变。
+    pub async fn admin_update_upstream_source(&self, id: &str, u: &crate::admin::NewUpstream) -> Result<(), String> {
+        id.parse::<i64>().map_err(|_| "账号 id 不正确".to_string())?;
+        let mapping: serde_json::Map<String, Value> = u.models.iter().filter(|m| !m.contains('*')).map(|m| (m.clone(), json!(m))).collect();
+        let mut creds = json!({ "base_url": crate::admin::sub2api_base_url(&u.platform, &u.base_url), "api_key": u.api_key });
+        if !mapping.is_empty() {
+            creds["model_mapping"] = Value::Object(mapping);
+        }
+        let mut body = json!({ "credentials": creds });
+        if let Some(r) = u.rate_multiplier {
+            body["rate_multiplier"] = json!(r);
+        }
+        self.call(Method::PUT, &format!("/api/v1/admin/accounts/{id}"), Some(body)).await.map(|_| ())
+    }
+}
+
+impl Client {
+    /// 修改账号的“状态”（`active` / `inactive`）。和“调度”是两个独立的开关：能被用户调用到要两个都满足。
+    pub async fn admin_set_account_status(&self, id: &str, status: &str) -> Result<(), String> {
+        id.parse::<i64>().map_err(|_| "账号 id 不正确".to_string())?;
+        if status != "active" && status != "inactive" {
+            return Err("状态只能是 active 或 inactive".into());
+        }
+        self.call(Method::PUT, &format!("/api/v1/admin/accounts/{id}"), Some(json!({ "status": status }))).await.map(|_| ())
+    }
 }
