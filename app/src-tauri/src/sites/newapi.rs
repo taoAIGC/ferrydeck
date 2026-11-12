@@ -675,6 +675,7 @@ fn parse_channel(c: &Value) -> Option<crate::admin::Upstream> {
         status: status.into(),
         account_status: match status_n { 1 => "active", 2 => "inactive", _ => "error" }.into(),
         schedulable: None,
+        blocked: None,
         error,
         host: c.get("base_url").and_then(Value::as_str).filter(|s| !s.is_empty()).and_then(crate::admin::host_of),
         groups: csv("group"),

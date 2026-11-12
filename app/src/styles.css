@@ -7,6 +7,7 @@
   --col-metric: 80px;
   --col-models: 96px;
   --col-action: 80px;
+  --col-clients: 130px;
   --pill-h: 22px;
   --bg: #f6f7f9;
   --panel: #ffffff;
@@ -453,3 +454,18 @@ button.seg.on { background: var(--info-bg); color: var(--text); border-color: va
 
 /* 读取失败的格子：红色小字，悬停看原因 */
 .muted.fail { color: var(--err-fg, #d33); }
+
+/* 账号状态：上游现在不能被调用到时，左侧菜单项标红 */
+.modal-nav .nav-item.bad { color: var(--err-fg, #d33); display: flex; align-items: center; gap: 6px; }
+.modal-nav .nav-item.bad.on { border-color: var(--err-fg, #d33); }
+.state-note { margin: 6px 0 2px; }
+.state-note p { margin: 2px 0; }
+
+/* 分组行的“客户端”列：药丸 + 多选下拉 */
+.cell-clients { flex: none; width: var(--col-clients); display: flex; align-items: center; justify-content: center; min-width: 0; }
+.clients-pill { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; height: var(--pill-h); padding: 0 10px; border: 0; border-radius: 999px; background: var(--info-bg); color: var(--text); font-size: var(--fs-s); font-weight: 600; cursor: pointer; }
+.clients-pill.unset { background: transparent; border: 1px dashed var(--accent-fg); color: var(--accent-fg); }
+.clients-pill .clients-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.clients-pill .caret { font-size: 10px; opacity: .7; }
+.clients-picker { position: fixed; z-index: 1100; width: 240px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.3); display: flex; flex-direction: column; gap: 6px; }
+.clients-picker .check-row { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }

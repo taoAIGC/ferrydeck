@@ -152,6 +152,8 @@ export interface Upstream {
   status: "active" | "paused" | "error";
   /** 站点上的原始“状态”：active / inactive / error */
   account_status: string;
+  /** 状态和调度都对，但站点自动暂时摘除了它：原因和恢复时间 */
+  blocked?: string | null;
   /** 站点上的“调度”开关（sub2api 才有）。能被调用到要“状态 = active 且 调度 = 开启” */
   schedulable: boolean | null;
   error: string | null;
@@ -309,7 +311,7 @@ export interface Backend {
   adminCreateGroup(siteId: string, group: NewGroup): Promise<string>;
   adminAddUpstream(siteId: string, downstreamId: string, upstreamSiteId: string, upstreamGroupId: string, name?: string, paused?: boolean, allowDuplicate?: boolean, testModel?: string): Promise<AddedUpstream>;
   adminReplaceUpstream(siteId: string, upstreamId: string, upstreamSiteId: string, upstreamGroupId: string, name?: string, testModel?: string): Promise<AddedUpstream>;
-  adminSetAccountState(siteId: string, upstreamId: string, status?: "active" | "inactive", schedulable?: boolean): Promise<void>;
+  adminSetAccountState(siteId: string, upstreamId: string, status?: "active" | "inactive" | "error", schedulable?: boolean): Promise<void>;
   adminRemoveGroup(siteId: string, groupId: string): Promise<void>;
   setGroupClients(siteId: string, groupId: string, clients: ClientId[]): Promise<void>;
   sayHi(siteId: string, groupId: string, model?: string | null, client?: ClientId): Promise<SayHi>;

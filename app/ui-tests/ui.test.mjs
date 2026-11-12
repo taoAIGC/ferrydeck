@@ -1722,7 +1722,7 @@ test("站长视角：上游和下游行都显示首字时延 / 倍率 / Token成
   assert.equal(await T(p, "group-models-2").textContent(), "3 个模型", "下游的模型 = 来源上游支持的模型并集");
   // 上游 u1：成本口径是付给上游的（mock 里 1.5），倍率是账号倍率
   assert.equal(await T(p, "account-speed-u1").first().textContent(), "0.70s");
-  assert.equal(await T(p, "account-cost-u1").first().textContent(), "未关联", "没关联上游分组就没有真实账单，不估算");
+  assert.equal(await T(p, "account-cost-u1").first().textContent(), "关联", "没关联上游分组就没有真实账单，不估算");
   assert.equal(await T(p, "account-rate-u1").first().textContent(), "×0.09?", "未关联：按名称推荐的分组倍率");
   assert.equal(await T(p, "account-cache-u1").first().textContent(), "33.0%");
   assert.equal(await T(p, "account-models-u1").first().textContent(), "3 个模型");
@@ -1805,7 +1805,7 @@ test("站长视角：分组和上游行都有“24h流水”列：下游 +收入
   await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
   console.log("FLOW", await T(p, "group-tokens-2").textContent(), await T(p, "group-tokens-4").textContent(), await T(p, "account-tokens-u1").first().textContent());
   assert.match(await T(p, "group-tokens-4").textContent(), /^\+≥/, "只统计了一部分");
-  assert.equal(await T(p, "account-tokens-u1").first().textContent(), "未关联", "上游成本只读真实账单：没关联上游分组就没有");
+  assert.equal(await T(p, "account-tokens-u1").first().textContent(), "关联", "上游成本只读真实账单：没关联上游分组就没有");
   await T(p, "group-tokens-2").hover();
   await p.waitForFunction(() => /过去 24 小时用户为这个分组支付的钱.*Token 25\.90M/.test(document.getElementById("fd-tip")?.textContent ?? ""));
   await done(p);
@@ -1835,7 +1835,7 @@ test("站长视角：上游账号关联到上游站点的分组后，倍率读�
   // u1：名称“官方账号池 0.09”，上游站点里恰好有一个倍率 0.09 的分组 → 推荐（虚线 + 问号），成本先按官方价口径
   assert.equal(await T(p, "account-rate-u1").first().textContent(), "×0.09?");
   assert.match(await T(p, "account-rate-u1").first().getAttribute("class"), /hint/);
-  assert.equal(await T(p, "account-cost-u1").first().textContent(), "未关联");
+  assert.equal(await T(p, "account-cost-u1").first().textContent(), "关联");
   // u2：名称里的 0.35 在上游站点没有对应分组 → 没推荐，显示“关联”
   assert.equal(await T(p, "account-rate-u2").first().textContent(), "关联");
   // 点“×0.09?”：不再有单独的关联弹窗，打开编辑（更换来源）弹窗，默认选中推荐的分组
@@ -2003,8 +2003,9 @@ test("启用按钮右边有“···”，悬停后换成三个图标（sayhi / 
   assert.equal(await T(p, "sayhi-alpha-2").isVisible(), false, "没悬停到“···”上时三个图标不显示");
   await T(p, "more-alpha-2").hover();
   await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="sayhi-alpha-2"]').closest(".more-icons")).display === "flex");
-  const ix = await p.evaluate(() => ["sayhi", "editclients", "makedown"].map((k) => document.querySelector(`[data-testid="${k}-alpha-2"]`).getBoundingClientRect().left));
-  assert.ok(ix[0] < ix[1] && ix[1] < ix[2], `顺序：sayhi | 修改分组 | 创建下游，实际 ${ix}`);
+  const ix = await p.evaluate(() => ["sayhi", "makedown"].map((k) => document.querySelector(`[data-testid="${k}-alpha-2"]`).getBoundingClientRect().left));
+  assert.ok(ix[0] < ix[1], `顺序：sayhi | 创建下游，实际 ${ix}`);
+  assert.equal(await count(p, '[data-testid^="editclients-"]'), 0, "不再有“修改分组”图标，改在“客户端”列里修改");
   assert.equal(await T(p, "enable-alpha-2").evaluate((e) => getComputedStyle(e).opacity), "1", "行还在悬停状态，启用按钮没消失");
   await done(p);
 });
@@ -2049,34 +2050,47 @@ test("修改分组支持的客户端：多选保存后分组出现在对应客�
   await T(p, "client-codex").click();
   assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "Claude 类分组默认不在 Codex 下");
   await T(p, "client-claude").click();
-  await T(p, "more-alpha-2").hover();
-  await T(p, "editclients-alpha-2").click();
-  await T(p, "clients-dialog").waitFor();
+  // 客户端列：药丸显示现在配置到哪些客户端，点开多选下拉，关闭时保存
+  assert.match(await T(p, "clients-alpha-2").textContent(), /Claude/);
+  await T(p, "clients-alpha-2").click();
+  await T(p, "clients-picker").waitFor();
   assert.equal(await T(p, "ec-claude").isChecked(), true);
   assert.equal(await T(p, "ec-codex").isChecked(), false);
-  await T(p, "ec-codex").check();
-  await T(p, "ec-gemini").check();
-  await T(p, "ec-claude_desktop").uncheck();
-  await T(p, "ec-save").click();
-  await T(p, "clients-dialog").waitFor({ state: "detached" });
-  assert.match((await opsLog(p)).at(-1), /^clients:alpha:2:claude,codex,gemini$/);
+  await T(p, "ec-codex").click();
+  await T(p, "ec-gemini").click();
+  await T(p, "ec-claude_desktop").click();
+  assert.deepEqual(await opsLog(p), [], "还没关闭下拉，不保存");
+  await p.keyboard.press("Escape");
+  await T(p, "clients-picker").waitFor({ state: "detached" });
+  await p.waitForFunction(() => /^clients:alpha:2:claude,codex,gemini$/.test((window.__adminOps ?? []).at(-1) ?? ""));
   await T(p, "client-codex").click();
   await T(p, "group-card-alpha-2").waitFor();
   await T(p, "client-claude_desktop").click();
   assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "取消勾选的客户端下不再出现");
-  // 至少选一个
+  // 全部取消 = 恢复站点给的默认分类；点别处也会关闭并保存
   await T(p, "client-claude").click();
-  await T(p, "more-alpha-2").hover();
-  await T(p, "editclients-alpha-2").click();
-  for (const c of ["claude", "codex", "gemini"]) await T(p, `ec-${c}`).uncheck();
-  await T(p, "ec-save").click();
-  assert.match(await T(p, "ec-error").textContent(), /至少选一个客户端/);
-  // 恢复默认
-  await T(p, "ec-reset").click();
-  await T(p, "clients-dialog").waitFor({ state: "detached" });
-  assert.match((await opsLog(p)).at(-1), /^clients:alpha:2:-$/);
+  await T(p, "clients-alpha-2").click();
+  for (const c of ["claude", "codex", "gemini"]) await T(p, `ec-${c}`).click();
+  await p.mouse.click(5, 5);
+  await T(p, "clients-picker").waitFor({ state: "detached" });
+  await p.waitForFunction(() => /^clients:alpha:2:-$/.test((window.__adminOps ?? []).at(-1) ?? ""));
   await T(p, "client-codex").click();
   await p.waitForFunction(() => !document.querySelector('[data-testid="group-card-alpha-2"]'));
+  await done(p);
+});
+
+test("客户端列：站点没给分类的分组显示“未设置”，下拉里默认全不选；表头有“客户端”列", async () => {
+  const p = await open("sites2");
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.match(await T(p, "list-head").textContent(), /客户端/);
+  const unset = p.locator('[data-testid^="clients-beta-"]').first();
+  await unset.waitFor();
+  assert.equal((await unset.textContent()).replace("▾", "").trim(), "未设置");
+  await unset.click();
+  await T(p, "clients-picker").waitFor();
+  for (const c of ["claude", "claude_desktop", "codex", "gemini"]) assert.equal(await T(p, `ec-${c}`).isChecked(), false, `${c} 默认不选`);
+  await p.keyboard.press("Escape");
+  assert.deepEqual(await opsLog(p), [], "什么都没选就不保存");
   await done(p);
 });
 
@@ -2173,7 +2187,7 @@ test("左侧导航同一时间只有一张卡片处于激活；在中转站管�
 test("检查更新的左边显示当前版本号", async () => {
   const p = await open("sites1");
   await T(p, "app-version").waitFor();
-  assert.equal(await T(p, "app-version").textContent(), "v0.5.0");
+  assert.equal(await T(p, "app-version").textContent(), "v0.5.2");
   const xs = await p.evaluate(() => ["app-version", "check-update"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
   assert.ok(xs[0] < xs[1], `版本号在“检查更新”左边: ${xs}`);
   await done(p);
@@ -2341,16 +2355,24 @@ test("更换来源的弹窗：左侧导航“上游调整 / 账号状态”，�
   assert.match(await T(p, "au-nav-source").getAttribute("class"), /\bon\b/, "默认是“上游调整”");
   assert.equal(await T(p, "au-site").count(), 1, "上游调整里是现在的设置");
   await T(p, "au-nav-state").click();
-  assert.match(await T(p, "st-hint").textContent(), /状态 = 启用、调度 = 开启，用户才能调用通/);
+  assert.match(await T(p, "st-hint").textContent(), /按 sub2api 的规则.*状态 = 启用、调度 = 开启、没有被站点自动暂时摘除/);
+  assert.equal(await count(p, '[data-testid^="st-status-"]'), 3, "sub2api 的账号状态有三种：启用 / 停用 / 异常");
+  assert.deepEqual(await p.locator('.segs').first().locator("button").allTextContents(), ["启用", "停用", "异常"]);
+  assert.match(await T(p, "au-nav-state").getAttribute("class"), /\bbad\b/, "现在调用不通：左侧“账号状态”标红");
   // u2：状态启用但调度关闭 → 现在调用不通
   assert.match(await T(p, "st-now").textContent(), /不会被调用到.*调度是“关闭”/);
   await T(p, "st-sched-on").click();
   await p.waitForFunction(() => /这个上游能被用户调用到/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
   assert.equal((await opsLog(p)).at(-1), "state:u2:-:true");
+  assert.doesNotMatch(await T(p, "au-nav-state").getAttribute("class"), /\bbad\b/, "恢复后不再标红");
   // 状态改成停用 → 又不通了，并且调度不动
   await T(p, "st-status-inactive").click();
-  await p.waitForFunction(() => /状态不是“启用”/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  await p.waitForFunction(() => /状态是“停用”/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
   assert.equal((await opsLog(p)).at(-1), "state:u2:inactive:-");
+  // 手动标为异常：和被系统自动标记一样
+  await T(p, "st-status-error").click();
+  await p.waitForFunction(() => /状态是“异常”/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
+  assert.equal((await opsLog(p)).at(-1), "state:u2:error:-");
   await T(p, "st-status-active").click();
   await p.waitForFunction(() => /这个上游能被用户调用到/.test(document.querySelector('[data-testid="st-now"]')?.textContent ?? ""));
   await T(p, "st-close").click();
@@ -2413,5 +2435,59 @@ test("添加站点的第一步不再写“填你平时登录的那个中转站�
   await T(p, "empty-sites-add").click();
   await T(p, "add-url").waitFor();
   assert.ok(!(await p.locator(".modal").innerText()).includes("填你平时登录的那个中转站网址"));
+  await done(p);
+});
+
+test("上游账号没关联时：成本和 24h流水也显示可点的“关联”，和倍率列一样打开编辑弹窗", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "operator-alpha").click();
+  await T(p, "account-cost-u1").first().waitFor();
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  for (const what of ["cost", "tokens"]) {
+    const b = T(p, `account-${what}-u1`).first();
+    assert.equal(await b.textContent(), "关联");
+    assert.equal(await b.evaluate((e) => e.tagName), "BUTTON");
+    assert.match(await b.getAttribute("class"), /hint/, "虚线样式，和倍率列一致");
+  }
+  await T(p, "account-tokens-u1").first().click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "add-upstream-dialog").textContent(), /更换「官方账号池 0\.09」的上游分组来源/);
+  await done(p);
+});
+
+test("账号状态：被站点自动摘除（限流 / 过载 / 临时不可调度）时，左侧“账号状态”标红并写明原因和恢复时间", async () => {
+  const p = await open("sites2,admin,blocked");
+  await T(p, "operator-alpha").click();
+  await T(p, "up-edit-u1").first().click();
+  await T(p, "add-upstream-dialog").waitFor();
+  assert.match(await T(p, "au-nav-state").getAttribute("class"), /\bbad\b/);
+  await T(p, "au-nav-state").click();
+  assert.match(await T(p, "st-now").textContent(), /不会被调用到.*站点自动暂时摘除了它：触发了上游限流（429），约 5 分钟后自动恢复/);
+  assert.match(await p.locator(".state-note").last().textContent().catch(() => ""), /|/);
+  await done(p);
+});
+
+test("基于上游分组创建下游：除了新建，也可以选择已有的下游分组，把上游加到它下面", async () => {
+  const p = await open("sites2,admin");
+  await T(p, "group-card-alpha-2").waitFor();
+  await p.waitForFunction(() => !document.body.textContent.includes("读取中…"));
+  await T(p, "more-alpha-2").hover();
+  await T(p, "makedown-alpha-2").click();
+  await T(p, "makedown-dialog").waitFor();
+  assert.match(await T(p, "md-mode-new").getAttribute("class"), /\bon\b/, "默认是新建");
+  await T(p, "md-mode-existing").click();
+  assert.equal(await count(p, '[data-testid="md-name"]'), 0, "选已有分组时不用填名称 / 倍率 / 备注");
+  assert.equal(await count(p, '[data-testid="md-rate"]'), 0);
+  await p.waitForFunction(() => document.querySelectorAll('[data-testid="md-existing"] option').length > 1);
+  await T(p, "md-submit").click();
+  assert.match(await T(p, "md-error").textContent(), /请选择一个已有的下游分组/);
+  const opts = await T(p, "md-existing").locator("option").allTextContents();
+  assert.ok(opts.length > 1, `列出已有的下游分组: ${opts}`);
+  const target = await T(p, "md-existing").locator("option").nth(1).getAttribute("value");
+  await T(p, "md-existing").selectOption(target);
+  await T(p, "md-submit").click();
+  await T(p, "makedown-result").waitFor();
+  assert.match(await T(p, "makedown-result").textContent(), /已有的下游分组.*下添加了上游/);
+  assert.match((await opsLog(p)).at(-1), new RegExp(`^add-upstream:${target}:alpha:2:`), "走的是添加上游，不是新建分组");
   await done(p);
 });

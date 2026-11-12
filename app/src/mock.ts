@@ -119,7 +119,7 @@ export function createMockBackend(): Backend {
           : [{ id: "GPT Pro", name: "GPT Pro", description: "GPT PRO 账号", platform: "", rate_multiplier: 0.258, status: "active", editable: true }],
         upstreams: alpha
           ? [
-              { id: "u1", name: "官方账号池 0.09", platform: "anthropic", kind: "apikey", status: "active", account_status: "active", schedulable: true, error: null, host: "api.up-one.com", groups: ["2", "4"], models: 12, model_names: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"], rate_multiplier: 1, priority: 50 },
+              { id: "u1", name: "官方账号池 0.09", platform: "anthropic", kind: "apikey", status: "active", account_status: "active", schedulable: true, blocked: has("blocked") ? "触发了上游限流（429），约 5 分钟后自动恢复" : null, error: null, host: "api.up-one.com", groups: ["2", "4"], models: 12, model_names: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"], rate_multiplier: 1, priority: 50 },
               { id: "u2", name: "备用上游 0.35", platform: "anthropic", kind: "apikey", status: "paused", account_status: "active", schedulable: false, error: null, host: "api.up-two.com", groups: ["4", "12"], models: 8, model_names: ["claude-sonnet-5-5", "claude-sonnet-5"], rate_multiplier: 0.5, priority: 60 },
               { id: "u3", name: has("hint") ? "异常账号 0.7" : "异常账号", platform: "anthropic", kind: "oauth", status: "error", account_status: "error", schedulable: true, error: "401 invalid key", host: has("hint") ? "api.up-three.com" : null, groups: ["12"], models: 3, model_names: ["claude-haiku-5-5"], rate_multiplier: null, priority: null },
             ]
@@ -139,7 +139,7 @@ export function createMockBackend(): Backend {
 
   return {
     async appVersion() {
-      return "0.5.0";
+      return "0.5.2";
     },
     async checkUpdate() {
       await delay();

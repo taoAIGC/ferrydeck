@@ -22,6 +22,8 @@ pub struct Upstream {
     pub account_status: String,
     /// 站点上这个账号的“调度”开关（sub2api 才有；new-api 的渠道没有这个概念）。能被用户调用到要“状态 = active 且 调度 = 开启”。
     pub schedulable: Option<bool>,
+    /// 状态和调度都对，但站点自动把它暂时摘除了（上游限流 / 过载 / 临时不可调度 / 过期自动暂停）：写明原因和恢复时间；没有就是 None。
+    pub blocked: Option<String>,
     pub error: Option<String>,
     /// 上游地址的主机名（不含路径和 Key），用来区分同名账号。
     pub host: Option<String>,

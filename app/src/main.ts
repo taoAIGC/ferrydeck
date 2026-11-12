@@ -55,14 +55,6 @@ interface SayHiDialog {
   results: (SayHi & { client: ClientId })[];
 }
 
-/** 修改分组支持的客户端（多选） */
-interface EditClientsDialog {
-  type: "edit-clients";
-  g: GroupView;
-  selected: ClientId[];
-  busy: boolean;
-  error: string;
-}
 
 /** 基于上游分组创建下游分组：选中转站，填名称、客户端类型、倍率、备注 */
 interface MakeDownstreamDialog {
@@ -75,6 +67,9 @@ interface MakeDownstreamDialog {
   description: string;
   paused: boolean;
   testModel: string;
+  /** 新建一个下游分组，或者把上游加到已有的下游分组 */
+  mode: "new" | "existing";
+  existingId: string;
   busy: boolean;
   error: string;
   done: CreatedDownstream | null;
@@ -227,7 +222,7 @@ const state = {
   toast: null as Toast,
   /** 右侧成本抽屉；`entered` 记录滑入动画是否已经播过（重绘不要重播） */
   drawer: null as null | { siteId: string; groupId: string; name: string; siteName: string; status: "loading" | "ready" | "error"; data?: GroupUsage; error?: string; entered: boolean },
-  dialog: null as AdminRemoveGroupDialog | SayHiDialog | EditClientsDialog | MakeDownstreamDialog | AdminCreateGroupDialog | AdminAddUpstreamDialog | AdminConfirmDialog | GroupEditDialog | AddDialog | RemoveDialog | SpeedConfirmDialog | SpeedScopeDialog | UnclassifiedNotice | null,
+  dialog: null as AdminRemoveGroupDialog | SayHiDialog | MakeDownstreamDialog | AdminCreateGroupDialog | AdminAddUpstreamDialog | AdminConfirmDialog | GroupEditDialog | AddDialog | RemoveDialog | SpeedConfirmDialog | SpeedScopeDialog | UnclassifiedNotice | null,
   /** 测速进度和“停止”标志 */
   testDone: 0,
   testTotal: 0,
@@ -1109,18 +1104,13 @@ function bubbleIcon(): Node {
   t.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/></svg>';
   return t.content.firstChild!;
 }
-function slidersIcon(): Node {
-  const t = document.createElement("template");
-  t.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>';
-  return t.content.firstChild!;
-}
 function branchIcon(): Node {
   const t = document.createElement("template");
   t.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 12h6a4 4 0 0 0 4-0"/></svg>';
   return t.content.firstChild!;
 }
 
-/** 启用按钮右边的“…”：悬停后换成三个图标——sayhi 测试、修改分组支持的客户端、基于它创建下游分组。 */
+/** 启用按钮右边的“…”：悬停后换成两个图标——sayhi 测试、基于它创建下游分组。 */
 function moreMenu(g: GroupView, tid: string): HTMLElement {
   return el(
     "span",
@@ -1130,7 +1120,6 @@ function moreMenu(g: GroupView, tid: string): HTMLElement {
       "span",
       { class: "more-icons" },
       el("button", { class: "act-btn", "aria-label": "sayhi 测试", "data-tip": "sayhi 测试：选一个模型说一句 hi，看回复效果和延迟", "data-testid": `sayhi-${tid}`, onClick: () => openSayHi(g) }, bubbleIcon()),
-      el("button", { class: "act-btn", "aria-label": "修改分组", "data-tip": "修改这个分组支持的客户端类型（可多选）", "data-testid": `editclients-${tid}`, onClick: () => openEditClients(g) }, slidersIcon()),
       el("button", { class: "act-btn", "aria-label": "创建下游", "data-tip": "基于这个分组，在你的中转站创建下游分组", "data-testid": `makedown-${tid}`, onClick: () => openMakeDownstream(g) }, branchIcon()),
     ),
   );
@@ -1157,31 +1146,78 @@ async function runSayHi(d: SayHiDialog) {
   render();
 }
 
-function openEditClients(g: GroupView) {
-  state.dialog = { type: "edit-clients", g, selected: [...g.clients], busy: false, error: "" };
-  render();
+/**
+ * 分组行里的“客户端”列：药丸显示这个分组配置到哪些客户端，点开是多选下拉，勾选完点别处 / 按 Esc 关闭时保存（有改动才保存）。
+ * 站点没给分组分类的（`clients_inferred`）显示“未设置”，下拉里默认全不选，由用户自己选；全部取消 = 恢复站点给的默认分类。
+ */
+function clientsCell(g: GroupView, tid: string): HTMLElement {
+  const chosen = g.clients_inferred ? [] : g.clients;
+  const names = chosen.map((c) => CLIENTS[c].name);
+  const text = g.clients_inferred ? "未设置" : names.length === CLIENT_ORDER.length ? "全部客户端" : names.length <= 1 ? (names[0] ?? "未设置") : `${names[0]} +${names.length - 1}`;
+  const tip = g.clients_inferred ? "这个站点没有给分组分类：点击选择它可以配置到哪些客户端（可多选）" : `可以配置到：${names.join("、")}。点击修改（可多选）`;
+  return el("button", { class: `clients-pill${g.clients_inferred ? " unset" : ""}`, "data-tip": tip, "data-testid": `clients-${tid}`, onClick: (e: Event) => openClientsPicker(e.currentTarget as HTMLElement, g) }, el("span", { class: "clients-text" }, text), el("span", { class: "caret", "aria-hidden": "true" }, "▾"));
 }
 
-async function saveClients(d: EditClientsDialog, clients: ClientId[]) {
-  d.busy = true;
-  d.error = "";
-  render();
+let clientsPickerClose: (() => void) | null = null;
+function closeClientsPicker() {
+  clientsPickerClose?.();
+}
+function openClientsPicker(anchor: HTMLElement, g: GroupView) {
+  closeClientsPicker();
+  const initial: ClientId[] = g.clients_inferred ? [] : [...g.clients];
+  const selected = new Set<ClientId>(initial);
+  const m = document.createElement("div");
+  m.className = "clients-picker";
+  m.setAttribute("data-testid", "clients-picker");
+  for (const c of CLIENT_ORDER) {
+    const label = document.createElement("label");
+    label.className = "check-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = selected.has(c);
+    box.setAttribute("data-testid", `ec-${c}`);
+    box.addEventListener("change", () => (box.checked ? selected.add(c) : selected.delete(c)));
+    label.append(box, document.createTextNode(CLIENTS[c].name));
+    m.append(label);
+  }
+  const hint = document.createElement("div");
+  hint.className = "muted small";
+  hint.textContent = "只影响它出现在哪些客户端下、能不能一键配置；站点上的分组不变。全部取消 = 用站点给的默认分类。";
+  m.append(hint);
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - m.offsetWidth - 4))}px`;
+  m.style.top = `${r.bottom + m.offsetHeight + 8 > window.innerHeight ? Math.max(4, r.top - m.offsetHeight - 4) : r.bottom + 4}px`;
+  const onDown = (e: MouseEvent) => { if (!m.contains(e.target as Node) && !anchor.contains(e.target as Node)) closeClientsPicker(); };
+  const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeClientsPicker(); };
+  document.addEventListener("mousedown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  clientsPickerClose = () => {
+    document.removeEventListener("mousedown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    m.remove();
+    clientsPickerClose = null;
+    const now = CLIENT_ORDER.filter((c) => selected.has(c));
+    const changed = now.length !== initial.length || now.some((c) => !initial.includes(c));
+    if (changed) void saveClients(g, now);
+  };
+}
+
+async function saveClients(g: GroupView, clients: ClientId[]) {
   try {
-    await backend.setGroupClients(d.g.site_id, d.g.id, clients);
-    state.dialog = null;
-    showToast("ok", clients.length ? `已把「${d.g.name}」设为支持：${clients.map((c) => CLIENTS[c].name).join("、")}` : `「${d.g.name}」已恢复成站点给的默认分类`);
+    await backend.setGroupClients(g.site_id, g.id, clients);
+    showToast("ok", clients.length ? `已把「${g.name}」设为支持：${clients.map((c) => CLIENTS[c].name).join("、")}` : `「${g.name}」已恢复成站点给的默认分类`);
     await refreshAll(300, { models: false, costs: false });
   } catch (e) {
-    d.busy = false;
-    d.error = errText(e);
-    render();
+    showToast("err", `修改失败：${errText(e)}`);
   }
 }
 
 function openMakeDownstream(g: GroupView) {
   const first = state.sites.find((x) => x.is_admin && x.id !== g.site_id && x.connected);
   const known = ["anthropic", "openai", "gemini", "grok", "antigravity"].includes(g.platform);
-  state.dialog = { type: "make-downstream", g, siteId: first?.id ?? "", name: g.name, platform: known ? g.platform : "anthropic", rate: String(g.rate_multiplier), description: "", paused: true, testModel: "", busy: false, error: "", done: null };
+  state.dialog = { type: "make-downstream", g, siteId: first?.id ?? "", name: g.name, platform: known ? g.platform : "anthropic", rate: String(g.rate_multiplier), description: "", paused: true, testModel: "", mode: "new", existingId: "", busy: false, error: "", done: null };
+  if (first) void loadAdminLight(first.id); // “选择已有分组”要用到它的下游分组列表
   render();
 }
 
@@ -1189,6 +1225,25 @@ async function submitMakeDownstream(d: MakeDownstreamDialog) {
   const rate = Number(d.rate);
   const own = state.sites.find((x) => x.id === d.siteId);
   if (!d.siteId) { d.error = "请选择中转站"; render(); return; }
+  if (d.mode === "existing") {
+    if (!d.existingId) { d.error = "请选择一个已有的下游分组"; render(); return; }
+    d.busy = true;
+    d.error = "";
+    render();
+    try {
+      const added = await backend.adminAddUpstream(d.siteId, d.existingId, d.g.site_id, d.g.id, undefined, true, false, d.testModel || undefined);
+      d.done = { group_id: d.existingId, added };
+      d.busy = false;
+      render();
+      void loadDownstreamRefs();
+      void loadAdmin(d.siteId);
+    } catch (e) {
+      d.busy = false;
+      d.error = errText(e);
+      render();
+    }
+    return;
+  }
   if (!d.name.trim()) { d.error = "名称不能为空"; render(); return; }
   if (d.rate.trim() === "" || !Number.isFinite(rate) || rate <= 0) { d.error = "倍率必须是大于 0 的数字"; render(); return; }
   d.busy = true;
@@ -1254,6 +1309,7 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
       g.clients_inferred && el("span", { class: "unclassified", "data-testid": `unclassified-${tid}` }, "该站点未对分组分类"),
       ...((state.downstreamRefs[k] ?? []).length ? [el("div", { class: "downstream-lines", "data-testid": `downs-${tid}` }, ...state.downstreamRefs[k].map((r) => el("span", { class: "down-chip", "data-tip": `下游分组：${r.site_name} 里的「${r.group_name}」，倍率 ×${r.rate}`, "data-testid": `down-ref-${tid}-${r.group_id}` }, "↳ ", el("span", { class: "chip-site" }, r.site_name), " · ", r.group_name, " ", el("span", { class: "chip-rate" }, `×${r.rate}`))))] : []),
     ),
+    el("div", { class: "cell-clients" }, clientsCell(g, tid)),
     el("div", { class: "cell-speed" }, state.probing.has(k) ? octopusSpinner(tid) : speedText ? el("span", { class: `pill speed${realFrt === null && "error" in sp! ? " bad" : ""}`, "data-tip": realFrt !== null ? `真实首字时延（近 7 天 ${real!.frtN} 个请求的中位数，来自站点的使用记录）` : "error" in sp! ? `测速失败：${sp!.error}` : `本地测速的首字延迟（模型 ${sp!.model}）${sp!.input != null ? `；发一句“hi”站点计 ${sp!.input} 个输入 Token` : ""}`, "data-testid": `speed-${tid}` }, speedText) : (() => {
       const f = state.fails[`cost|${k}`];
       if (f) return el("span", { class: "muted small fail", "data-tip": `真实首字时延读取失败：${f}` }, "读取失败");
@@ -1571,7 +1627,7 @@ function modelsForGroup(siteId: string, groupId: string): string[] {
 }
 
 /** 账号状态页：点一下立即把“状态”或“调度”改到站点上，再重新读一次。 */
-async function setAccountState(d: AdminAddUpstreamDialog, change: { status?: "active" | "inactive"; schedulable?: boolean }) {
+async function setAccountState(d: AdminAddUpstreamDialog, change: { status?: "active" | "inactive" | "error"; schedulable?: boolean }) {
   if (!d.replace) return;
   d.busy = true;
   d.error = "";
@@ -1629,6 +1685,8 @@ async function submitAddUpstream(d: AdminAddUpstreamDialog) {
     d.done = d.replace
       ? await backend.adminReplaceUpstream(d.siteId, d.replace.id, d.upSiteId, d.groupId, d.name.trim() === d.replace.name ? undefined : d.name.trim(), d.testModel || undefined)
       : await backend.adminAddUpstream(d.siteId, d.down.id, d.upSiteId, d.groupId, d.name.trim(), true, d.dupOk, d.testModel || undefined);
+    // 换了上游分组：之前读到的真实账单是旧分组的，作废，免得 10 分钟缓存期内还显示旧数字
+    if (d.replace) delete state.adminBill[adminKey(d.siteId, "account", d.replace.id)];
     d.busy = false;
     render();
     void loadAdmin(d.siteId); // 新上游和关联马上出现在列表里（对话框保持打开，显示结果）
@@ -1836,6 +1894,9 @@ function viewOperator(siteId: string): HTMLElement {
     const cache = cacheShown(e);
     const bill = scope === "account" ? state.adminBill[k] : undefined;
     const billPending = scope === "account" && state.billPending.has(k);
+    // 没关联上游分组的格子：和倍率列的“关联”一样是可点的虚线按钮，点开编辑弹窗选上游分组
+    const linkBtn = (what: string) => el("button", { class: "rate hint", "data-tip": "还没关联上游分组：点击打开编辑，选择这个上游账号用的是哪个上游站点的哪个分组，关联后读取上游站点自己记的真实扣费，不估算", "data-testid": `${scope}-${what}-${id}`, onClick: linkInfo!.open }, "关联");
+    const unlinked = scope === "account" && !!linkInfo && !linkInfo.link.group_id;
     return [
       el("div", { class: "cell-speed" }, frt !== null ? el("span", { class: "pill", "data-tip": `真实首字时延（近 7 天 ${e!.frtN} 个请求的中位数，来自站点的使用记录）`, "data-testid": `${scope}-speed-${id}` }, `${(frt / 1000).toFixed(2)}s`) : e ? dash("speed", "无记录", `${e.note ? e.note + "；" : ""}近 7 天没有带首字时间的流式请求（只有流式请求才会记录首字时延）`) : dash("speed")),
       el(
@@ -1864,7 +1925,9 @@ function viewOperator(siteId: string): HTMLElement {
             ? el("span", { class: "rate", "data-tip": `真实账单：你在上游站点「${bill.siteName}」的分组「${bill.group}」近 7 天实际被扣的钱 ÷ 有效 Token（输入+输出）× 100 万。来自上游站点自己的用量记录，不是估算；如果你的账号在这个分组里还有别的 Key 在用，这里也包含它们；取数于 ${fullTime(bill.at)}`, "data-testid": `${scope}-cost-${id}` }, money(bill.currency, bill.perM))
             : billPending
               ? dash("cost")
-              : dash("cost", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组近 7 天没有用量记录，没有账单可算" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费，不估算", billFail)
+              : unlinked
+                ? linkBtn("cost")
+                : dash("cost", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组近 7 天没有用量记录，没有账单可算" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费，不估算", billFail)
           : e && e.perM !== null
             ? el("span", { class: "rate", "data-tip": `${costTip}；取数于 ${fullTime(e.at)}`, "data-testid": `${scope}-cost-${id}` }, money(e.currency, e.perM))
             : dash("cost", e ? "无用量" : "未读取", e ? "近 7 天没有用量" : undefined),
@@ -1881,7 +1944,7 @@ function viewOperator(siteId: string): HTMLElement {
         { class: "cell-tokens" },
         (() => {
           const fl = flow24(scope, e, bill);
-          if (fl === null) return billPending ? dash("tokens") : scope === "account" ? dash("tokens", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组 24 小时内没有扣费记录" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费", billFail) : dash("tokens", e ? "无流水" : "未读取", e ? `${e.note ? e.note + "；" : ""}没有读到 24 小时流水（站点没有返回这项数据，或近 24 小时没有调用）` : undefined);
+          if (fl === null) return billPending ? dash("tokens") : scope === "account" ? unlinked ? linkBtn("tokens") : dash("tokens", linkInfo?.link.group_id ? "无用量" : "未关联", linkInfo?.link.group_id ? "这个上游分组 24 小时内没有扣费记录" : "还没关联上游分组：关联后读取上游站点自己记的真实扣费", billFail) : dash("tokens", e ? "无流水" : "未读取", e ? `${e.note ? e.note + "；" : ""}没有读到 24 小时流水（站点没有返回这项数据，或近 24 小时没有调用）` : undefined);
           const t24 = scope === "group" ? e?.t24 : bill?.t24;
           const cap = scope === "group" ? e?.t24cap : bill?.c24cap;
           const tokens = t24 != null ? `Token ${cap ? "≥" : ""}${fmtTok(t24)}（输入+输出+缓存）` : "";
@@ -2004,10 +2067,10 @@ function viewOperator(siteId: string): HTMLElement {
   );
 }
 
-const isMenuDialog = (d: { type: string }): d is SayHiDialog | EditClientsDialog | MakeDownstreamDialog => d.type === "sayhi" || d.type === "edit-clients" || d.type === "make-downstream";
+const isMenuDialog = (d: { type: string }): d is SayHiDialog | MakeDownstreamDialog => d.type === "sayhi" || d.type === "edit-clients" || d.type === "make-downstream";
 
 /** 分组行“…”菜单里的三个对话框：sayhi 测试、修改支持的客户端、创建下游分组。 */
-function viewMenuDialog(d: SayHiDialog | EditClientsDialog | MakeDownstreamDialog): HTMLElement {
+function viewMenuDialog(d: SayHiDialog | MakeDownstreamDialog): HTMLElement {
   const close = () => {
     if (d.busy) return;
     state.dialog = null;
@@ -2049,35 +2112,11 @@ function viewMenuDialog(d: SayHiDialog | EditClientsDialog | MakeDownstreamDialo
       ),
     );
   }
-  if (d.type === "edit-clients") {
-    const all: ClientId[] = CLIENT_ORDER;
-    return el(
-      "div",
-      { class: "modal-mask", "data-testid": "clients-dialog" },
-      el(
-        "div",
-        { class: "modal wide", role: "dialog" },
-        el("h3", {}, `修改分组 · ${d.g.name}`),
-        el("p", { class: "muted small" }, "这个分组可以配置到哪些客户端（可多选）。只影响应用里它出现在哪些客户端下、能不能一键配置；站点上的分组不会变。"),
-        el(
-          "div",
-          { class: "form" },
-          ...all.map((c) => el("label", { class: "check-row" }, el("input", { type: "checkbox", checked: d.selected.includes(c), disabled: d.busy, "data-testid": `ec-${c}`, onChange: (e: Event) => { d.selected = (e.target as HTMLInputElement).checked ? [...d.selected, c] : d.selected.filter((x) => x !== c); } }), CLIENTS[c].name)),
-        ),
-        el("div", { class: "error", role: "alert", "data-testid": "ec-error" }, d.error),
-        el(
-          "div",
-          { class: "modal-actions" },
-          el("button", { type: "button", class: "ghost", "data-testid": "ec-reset", disabled: d.busy, onClick: () => void saveClients(d, []) }, "恢复默认"),
-          el("button", { type: "button", class: "ghost", "data-testid": "ec-cancel", disabled: d.busy, onClick: close }, "取消"),
-          el("button", { type: "button", class: "primary", "data-testid": "ec-save", disabled: d.busy, onClick: () => { if (d.selected.length === 0) { d.error = "至少选一个客户端（想用站点给的默认分类，点“恢复默认”）"; render(); } else void saveClients(d, CLIENT_ORDER.filter((c) => d.selected.includes(c))); } }, d.busy ? "保存中…" : "保存"),
-        ),
-      ),
-    );
-  }
   // make-downstream
   const admins = state.sites.filter((x) => x.is_admin && x.id !== d.g.site_id);
   const own = state.sites.find((x) => x.id === d.siteId);
+  const existing = state.admin[d.siteId]?.data?.downstreams ?? [];
+  const existingDown = existing.find((x) => x.id === d.existingId);
   if (d.done) {
     const r = d.done.added;
     return el(
@@ -2086,8 +2125,8 @@ function viewMenuDialog(d: SayHiDialog | EditClientsDialog | MakeDownstreamDialo
       el(
         "div",
         { class: "modal wide", role: "dialog" },
-        el("h3", {}, "已创建下游分组"),
-        el("ul", { class: "diff-list", "data-testid": "makedown-result" }, el("li", {}, `在「${own?.name ?? ""}」创建了下游分组「${d.name.trim()}」（×${d.rate}）`), el("li", {}, `把「${d.g.site_name}」的「${d.g.name}」添加为它的上游：${r.key_created ? "新建了" : "复用了"}专用 Key，读到 ${r.models} 个模型，试一次首字 ${(r.probe_ms / 1000).toFixed(2)}s，链路是通的`), el("li", {}, r.paused ? "上游现在是暂停状态，不会接收用户请求：确认没问题后到“我的中转站”里点“恢复”启用" : "上游已经启用，正在参与调度"), el("li", {}, "上游分组底下已经显示这个下游分组")),
+        el("h3", {}, d.mode === "existing" ? "已添加上游" : "已创建下游分组"),
+        el("ul", { class: "diff-list", "data-testid": "makedown-result" }, el("li", {}, d.mode === "existing" ? `在「${own?.name ?? ""}」已有的下游分组「${existingDown?.name ?? d.existingId}」下添加了上游` : `在「${own?.name ?? ""}」创建了下游分组「${d.name.trim()}」（×${d.rate}）`), el("li", {}, `把「${d.g.site_name}」的「${d.g.name}」添加为它的上游：${r.key_created ? "新建了" : "复用了"}专用 Key，读到 ${r.models} 个模型，试一次首字 ${(r.probe_ms / 1000).toFixed(2)}s，链路是通的`), el("li", {}, r.paused ? "上游现在是暂停状态，不会接收用户请求：确认没问题后到“我的中转站”里点这个上游的编辑，在“账号状态”里启用" : "上游已经启用，正在参与调度"), el("li", {}, "上游分组底下已经显示这个下游分组")),
         el("div", { class: "modal-actions" }, el("button", { type: "button", class: "primary", "data-testid": "md-done", onClick: close }, "完成")),
       ),
     );
@@ -2105,25 +2144,51 @@ function viewMenuDialog(d: SayHiDialog | EditClientsDialog | MakeDownstreamDialo
             "div",
             { class: "form" },
             el("label", { for: "md-site" }, "中转站（在哪个站点创建下游分组）"),
-            el("select", { id: "md-site", "data-testid": "md-site", disabled: d.busy, onChange: (e: Event) => { d.siteId = (e.target as HTMLSelectElement).value; render(true); } }, ...admins.map((x) => el("option", { value: x.id, selected: x.id === d.siteId, disabled: !x.connected }, x.connected ? x.name : `${x.name}（未连接）`))),
+            el("select", { id: "md-site", "data-testid": "md-site", disabled: d.busy, onChange: (e: Event) => { d.siteId = (e.target as HTMLSelectElement).value; d.existingId = ""; void loadAdminLight(d.siteId); render(true); } }, ...admins.map((x) => el("option", { value: x.id, selected: x.id === d.siteId, disabled: !x.connected }, x.connected ? x.name : `${x.name}（未连接）`))),
+            el(
+              "div",
+              { class: "segs", "data-testid": "md-mode" },
+              el("button", { type: "button", class: `seg${d.mode === "new" ? " on" : ""}`, "data-testid": "md-mode-new", disabled: d.busy, onClick: () => { d.mode = "new"; d.error = ""; render(true); } }, "新建下游分组"),
+              el("button", { type: "button", class: `seg${d.mode === "existing" ? " on" : ""}`, "data-testid": "md-mode-existing", disabled: d.busy, onClick: () => { d.mode = "existing"; d.error = ""; render(true); } }, "选择已有的下游分组"),
+            ),
+            ...(d.mode === "existing"
+              ? [
+                  el("label", { for: "md-existing" }, "已有的下游分组（把这个上游加到它下面）"),
+                  el(
+                    "select",
+                    { id: "md-existing", "data-testid": "md-existing", disabled: d.busy || existing.length === 0, onChange: (e: Event) => (d.existingId = (e.target as HTMLSelectElement).value) },
+                    el("option", { value: "" }, existing.length === 0 ? (state.admin[d.siteId]?.status === "error" ? "读取失败" : "读取中…（或这个中转站还没有下游分组）") : "请选择…"),
+                    ...existing.map((x) => {
+                      // sub2api 的下游分组有“客户端类型”，上游必须是同一类
+                      const mismatch = own?.kind === "sub2api" && x.platform && d.g.platform && x.platform !== d.g.platform;
+                      return el("option", { value: x.id, selected: x.id === d.existingId, disabled: !!mismatch }, `${x.name} · ×${x.rate_multiplier}${x.platform ? ` · ${platformLabel(x.platform)}` : ""}${mismatch ? "（类型和上游分组不一致，不能添加）" : ""}`);
+                    }),
+                  ),
+                  el("p", { class: "muted small" }, "不会改它的名称、倍率和备注；只是把这个上游分组作为一个新的上游账号加到它下面。同一个下游分组下有多个上游时，站点会按优先级和负载在它们之间分配用户请求。"),
+                ]
+              : []),
             el("label", { for: "md-model" }, "测试模型（用它发一句“hi”试上游分组）"),
             (() => {
               const ms = modelsForGroup(d.g.site_id, d.g.id);
               return el("select", { id: "md-model", "data-testid": "md-model", disabled: d.busy, onChange: (e: Event) => (d.testModel = (e.target as HTMLSelectElement).value) }, el("option", { value: "" }, ms.length ? "自动（挑一个便宜的）" : "自动（还不知道这个分组有哪些模型）"), ...ms.map((m) => el("option", { value: m, selected: m === d.testModel }, m)));
             })(),
-            el("label", { for: "md-name" }, "下游分组名称"),
-            el("input", { id: "md-name", type: "text", value: d.name, disabled: d.busy, "data-testid": "md-name", onInput: (e: Event) => (d.name = (e.target as HTMLInputElement).value) }),
-            own?.kind === "sub2api"
-              ? el("div", { class: "form" }, el("label", { for: "md-platform" }, "客户端类型（默认和上游分组一致，之后添加的上游必须是同一类）"), el("select", { id: "md-platform", "data-testid": "md-platform", disabled: d.busy, onChange: (e: Event) => (d.platform = (e.target as HTMLSelectElement).value) }, ...PLATFORM_CHOICES.map((p) => el("option", { value: p, selected: p === d.platform }, platformLabel(p)))))
-              : el("p", { class: "muted small" }, "new-api 的分组没有“客户端类型”这个设置。"),
-            el("label", { for: "md-rate" }, `下游倍率（上游分组是 ×${d.g.rate_multiplier}，加上你的利润）`),
-            el("input", { id: "md-rate", type: "text", inputmode: "decimal", value: d.rate, disabled: d.busy, "data-testid": "md-rate", onInput: (e: Event) => (d.rate = (e.target as HTMLInputElement).value) }),
-            el("label", { for: "md-desc" }, "备注"),
-            el("input", { id: "md-desc", type: "text", value: d.description, disabled: d.busy, "data-testid": "md-desc", onInput: (e: Event) => (d.description = (e.target as HTMLInputElement).value) }),
-            el("p", { class: "muted small" }, `点“创建”后：在中转站创建下游分组 → 在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到这个下游分组。任何一步失败会撤销上游的部分；下游分组一旦创建会保留。`),
+            ...(d.mode === "new"
+              ? [
+                el("label", { for: "md-name" }, "下游分组名称"),
+                el("input", { id: "md-name", type: "text", value: d.name, disabled: d.busy, "data-testid": "md-name", onInput: (e: Event) => (d.name = (e.target as HTMLInputElement).value) }),
+                own?.kind === "sub2api"
+                ? el("div", { class: "form" }, el("label", { for: "md-platform" }, "客户端类型（默认和上游分组一致，之后添加的上游必须是同一类）"), el("select", { id: "md-platform", "data-testid": "md-platform", disabled: d.busy, onChange: (e: Event) => (d.platform = (e.target as HTMLSelectElement).value) }, ...PLATFORM_CHOICES.map((p) => el("option", { value: p, selected: p === d.platform }, platformLabel(p)))))
+                : el("p", { class: "muted small" }, "new-api 的分组没有“客户端类型”这个设置。"),
+                el("label", { for: "md-rate" }, `下游倍率（上游分组是 ×${d.g.rate_multiplier}，加上你的利润）`),
+                el("input", { id: "md-rate", type: "text", inputmode: "decimal", value: d.rate, disabled: d.busy, "data-testid": "md-rate", onInput: (e: Event) => (d.rate = (e.target as HTMLInputElement).value) }),
+                el("label", { for: "md-desc" }, "备注"),
+                el("input", { id: "md-desc", type: "text", value: d.description, disabled: d.busy, "data-testid": "md-desc", onInput: (e: Event) => (d.description = (e.target as HTMLInputElement).value) }),
+                ]
+              : []),
+            el("p", { class: "muted small" }, d.mode === "existing" ? `点“添加”后：在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到选中的下游分组（默认暂停）。任何一步失败会撤销上游的部分。` : `点“创建”后：在中转站创建下游分组 → 在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到这个下游分组。任何一步失败会撤销上游的部分；下游分组一旦创建会保留。`),
           ),
       el("div", { class: "error", role: "alert", "data-testid": "md-error" }, d.error),
-      el("div", { class: "modal-actions" }, el("button", { type: "button", class: "ghost", "data-testid": "md-cancel", disabled: d.busy, onClick: close }, "取消"), admins.length ? el("button", { type: "submit", class: "primary", "data-testid": "md-submit", disabled: d.busy }, d.busy ? "创建中…（要建 Key 并试一次，稍等）" : "创建") : null),
+      el("div", { class: "modal-actions" }, el("button", { type: "button", class: "ghost", "data-testid": "md-cancel", disabled: d.busy, onClick: close }, "取消"), admins.length ? el("button", { type: "submit", class: "primary", "data-testid": "md-submit", disabled: d.busy }, d.busy ? "处理中…（要建 Key 并试一次，稍等）" : d.mode === "existing" ? "添加" : "创建") : null),
     ),
   );
 }
@@ -2185,23 +2250,49 @@ function viewAdminDialog(d: AdminRemoveGroupDialog | AdminCreateGroupDialog | Ad
       );
     }
     // 左侧的“账号状态”页：快速修改 sub2api 账号的“状态”和“调度”（new-api 的渠道只有一个启用 / 停用开关）
+    // 这个上游现在能不能被用户调用到（状态、调度、站点自动摘除三者都要通过）；不通时左侧“账号状态”标红
+    const upNow = state.admin[d.siteId]?.data?.upstreams.find((u) => u.id === d.replace?.id) ?? d.replace;
+    const stateBad = !!upNow && (upNow.account_status !== "active" || upNow.schedulable === false || !!upNow.blocked);
     const statePane = () => {
       const up = state.admin[d.siteId]?.data?.upstreams.find((u) => u.id === d.replace!.id) ?? d.replace!;
       const sub = own?.kind === "sub2api";
       const active = up.account_status === "active";
       const sched = up.schedulable !== false;
-      const callable = active && sched;
-      const seg = (label: string, on: boolean, id: string, act: () => void) => el("button", { type: "button", class: `seg${on ? " on" : ""}`, "data-testid": id, disabled: d.busy, onClick: act }, label);
+      const callable = active && sched && !up.blocked;
+      const seg = (label: string, on: boolean, id: string, act: () => void, tip?: string) => el("button", { type: "button", class: `seg${on ? " on" : ""}`, "data-testid": id, ...(tip ? { "data-tip": tip } : {}), disabled: d.busy, onClick: act }, label);
+      const note = (...lines: string[]) => el("div", { class: "muted small state-note" }, ...lines.map((l) => el("p", {}, l)));
+      const reasons = [!active ? (up.account_status === "error" ? "状态是“异常”" : "状态是“停用”") : "", !sched ? "调度是“关闭”" : "", up.blocked ? `站点自动暂时摘除了它：${up.blocked}` : ""].filter(Boolean);
       return [
         el("h3", {}, `账号状态 · ${up.name}`),
-        el("p", { class: "muted small", "data-testid": "st-hint" }, sub ? "这两个设置要同时是：状态 = 启用、调度 = 开启，用户才能调用通；任何一个不对，这个上游都不会接到用户请求。点一下立即生效。" : "这个站点的渠道只有一个开关：状态 = 启用，用户才能调用通。点一下立即生效。"),
-        el("div", { class: "form" }, el("label", {}, "状态"), el("div", { class: "segs" }, seg("启用", active, "st-status-active", () => void setAccountState(d, { status: "active" })), seg("停用", up.account_status === "inactive", "st-status-inactive", () => void setAccountState(d, { status: "inactive" })))),
-        sub ? el("div", { class: "form" }, el("label", {}, "调度"), el("div", { class: "segs" }, seg("开启", sched, "st-sched-on", () => void setAccountState(d, { schedulable: true })), seg("关闭", !sched, "st-sched-off", () => void setAccountState(d, { schedulable: false })))) : null,
+        el("p", { class: "muted small", "data-testid": "st-hint" }, sub ? "按 sub2api 的规则，要同时满足三条，用户的请求才会被分配到这个上游：状态 = 启用、调度 = 开启、没有被站点自动暂时摘除。任何一条不满足，这个上游都不会接到用户请求。点一下立即生效。" : "这个站点的渠道只有一个开关：状态 = 启用，用户才能调用通。点一下立即生效。"),
         el(
-          "p",
-          { class: callable ? "ok-line" : "bad-line", "data-testid": "st-now" },
-          callable ? "现在：✓ 这个上游能被用户调用到" : up.account_status === "error" ? "现在：✕ 站点把这个账号标为异常（状态 error），先到站点排查原因，改这里的开关解决不了" : `现在：✕ 不会被调用到——${!active ? "状态不是“启用”" : ""}${!active && !sched ? "，" : ""}${!sched ? "调度是“关闭”" : ""}`,
+          "div",
+          { class: "form" },
+          el("label", {}, "状态"),
+          el(
+            "div",
+            { class: "segs" },
+            seg("启用", active, "st-status-active", () => void setAccountState(d, { status: "active" })),
+            seg("停用", up.account_status === "inactive", "st-status-inactive", () => void setAccountState(d, { status: "inactive" })),
+            sub ? seg("异常", up.account_status === "error", "st-status-error", () => void setAccountState(d, { status: "error" }), "手动把账号标为异常，效果和被系统自动标记一样：不再被调度") : null,
+          ),
+          sub
+            ? note("启用（active）：账号参与调度。", "停用（inactive）：管理员手动停用，不接任何请求，数据保留。", "异常（error）：账号出了问题（凭据失效、上游返回认证 / 账号错误等），系统会自动把它标为异常，也可以手动标；异常账号不会被调度，要先排查原因（看站点里的错误信息），再改回“启用”。")
+            : note("启用：渠道参与调度。停用：手动停用。被系统自动禁用（连续失败时）的渠道会显示为“异常”，需要排查后重新启用。"),
         ),
+        sub
+          ? el(
+              "div",
+              { class: "form" },
+              el("label", {}, "调度"),
+              el("div", { class: "segs" }, seg("开启", sched, "st-sched-on", () => void setAccountState(d, { schedulable: true })), seg("关闭", !sched, "st-sched-off", () => void setAccountState(d, { schedulable: false }))),
+              note("开启：可以接收新的用户请求。关闭：不再接新请求，但账号仍是“启用”，适合临时摘除（比如想先观察、不让用户用）；不影响已有数据。"),
+            )
+          : null,
+        sub ? note("自动摘除（不能在这里手动改）：即使状态和调度都对，账号遇到上游限流（429）、上游过载、命中“临时不可调度”规则、或设置了“过期自动暂停”且已过期，站点会暂时不再调度它，到恢复时间自动恢复。") : null,
+        sub ? note("提醒：一个下游分组下所有上游账号都不可用时，这个分组的用户请求会失败（报“没有可用账号”）。") : null,
+        el("p", { class: callable ? "ok-line" : "bad-line", "data-testid": "st-now" }, callable ? "现在：✓ 这个上游能被用户调用到" : `现在：✕ 不会被调用到——${reasons.join("；")}`),
+        up.account_status === "error" && up.error ? el("p", { class: "bad-line small", "data-testid": "st-error-msg" }, `站点记录的异常原因：${up.error}`) : null,
         el("div", { class: "error", role: "alert", "data-testid": "st-error" }, d.error),
         el("div", { class: "modal-actions" }, el("button", { type: "button", class: "primary", "data-testid": "st-close", onClick: close }, "关闭")),
       ];
@@ -2264,7 +2355,7 @@ function viewAdminDialog(d: AdminRemoveGroupDialog | AdminCreateGroupDialog | Ad
         { class: `modal wide${d.replace ? " with-nav" : ""}`, role: "dialog", onSubmit: (ev: Event) => { ev.preventDefault(); if (!d.busy && okSites.length && d.tab === "source") void submitAddUpstream(d); } },
         ...(d.replace
           ? [
-              el("div", { class: "modal-nav" }, el("button", { type: "button", class: `nav-item${d.tab === "source" ? " on" : ""}`, "data-testid": "au-nav-source", onClick: () => { d.tab = "source"; d.error = ""; render(true); } }, "上游调整"), el("button", { type: "button", class: `nav-item${d.tab === "state" ? " on" : ""}`, "data-testid": "au-nav-state", onClick: () => { d.tab = "state"; d.error = ""; render(true); } }, "账号状态")),
+              el("div", { class: "modal-nav" }, el("button", { type: "button", class: `nav-item${d.tab === "source" ? " on" : ""}`, "data-testid": "au-nav-source", onClick: () => { d.tab = "source"; d.error = ""; render(true); } }, "上游调整"), el("button", { type: "button", class: `nav-item${d.tab === "state" ? " on" : ""}${stateBad ? " bad" : ""}`, "data-testid": "au-nav-state", ...(stateBad ? { "data-tip": "这个上游账号现在不能被用户调用到，点开看原因" } : {}), onClick: () => { d.tab = "state"; d.error = ""; render(true); } }, stateBad ? el("span", { class: "tab-dot bad" }) : null, "账号状态")),
               el("div", { class: "modal-pane" }, ...(d.tab === "state" ? statePane() : sourcePane())),
             ]
           : sourcePane()),
@@ -2536,6 +2627,7 @@ function viewListHead(available: string[]): HTMLElement {
     "div",
     { class: "card list-head", "data-testid": "list-head" },
     el("div", { class: "card-main" }, siteCell),
+    el("div", { class: "cell-clients" }, el("span", { class: "col-head" }, "客户端")),
     // 测速按钮放在“首字时延”标题的左边：测速测的就是这一列
     el(
       "div",

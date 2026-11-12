@@ -424,6 +424,32 @@ fn id_string(v: &Value) -> Option<String> {
     v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(String::from))
 }
 
+/// sub2api 会在这些情况下自动把账号暂时摘除调度（即使状态 = 启用、调度 = 开启）：上游限流（429）、上游过载、命中“临时不可调度”规则、
+/// 设置了“过期自动暂停”且已过期。到恢复时间会自动恢复，管理员不能在这里手动改。返回写给站长看的原因；没有被摘除就是 None。
+fn auto_block(a: &Value) -> Option<String> {
+    let now = crate::sites::http::now();
+    let until = |k: &str| a.get(k).and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).filter(|t| *t > now);
+    let left = |t: i64| {
+        let m = ((t - now) + 59) / 60;
+        if m >= 90 { format!("约 {} 小时", (m + 59) / 60) } else { format!("约 {m} 分钟") }
+    };
+    if let Some(t) = until("rate_limit_reset_at") {
+        return Some(format!("触发了上游限流（429），{}后自动恢复", left(t)));
+    }
+    if let Some(t) = until("overload_until") {
+        return Some(format!("上游过载，{}后自动恢复", left(t)));
+    }
+    if let Some(t) = until("temp_unschedulable_until") {
+        let why = a.get("temp_unschedulable_reason").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| format!("（{}）", crate::admin::tidy_error(s))).unwrap_or_default();
+        return Some(format!("命中了“临时不可调度”规则{why}，{}后自动恢复", left(t)));
+    }
+    let expired = a.get("expires_at").and_then(Value::as_str).and_then(crate::admin::parse_rfc3339).is_some_and(|t| t <= now);
+    if expired && a.get("auto_pause_on_expired").and_then(Value::as_bool).unwrap_or(false) {
+        return Some("账号已过期，并且设置了“过期自动暂停”".into());
+    }
+    None
+}
+
 /// 把站点返回的一个账号整理成 `Upstream`。凭据（`credentials` 里的 Key、令牌）只取地址主机名和模型数量，其余丢弃。
 fn parse_upstream(a: &Value) -> Option<crate::admin::Upstream> {
     let id = id_string(a.get("id")?)?;
@@ -452,6 +478,7 @@ fn parse_upstream(a: &Value) -> Option<crate::admin::Upstream> {
         status: status.into(),
         account_status: status_raw.to_string(),
         schedulable: Some(schedulable),
+        blocked: auto_block(a),
         error: if status == "error" { Some(error.map(|e| crate::admin::tidy_error(&e)).unwrap_or_else(|| "站点把这个账号标为异常".into())) } else { None },
         host: cred.and_then(|c| c.get("base_url")).and_then(Value::as_str).and_then(crate::admin::host_of),
         groups,
@@ -672,11 +699,11 @@ impl Client {
 }
 
 impl Client {
-    /// 修改账号的“状态”（`active` / `inactive`）。和“调度”是两个独立的开关：能被用户调用到要两个都满足。
+    /// 修改账号的“状态”（`active` 启用 / `inactive` 停用 / `error` 异常）。和“调度”是两个独立的开关：能被用户调用到要两个都满足。
     pub async fn admin_set_account_status(&self, id: &str, status: &str) -> Result<(), String> {
         id.parse::<i64>().map_err(|_| "账号 id 不正确".to_string())?;
-        if status != "active" && status != "inactive" {
-            return Err("状态只能是 active 或 inactive".into());
+        if !["active", "inactive", "error"].contains(&status) {
+            return Err("状态只能是 active、inactive 或 error".into());
         }
         self.call(Method::PUT, &format!("/api/v1/admin/accounts/{id}"), Some(json!({ "status": status }))).await.map(|_| ())
     }
