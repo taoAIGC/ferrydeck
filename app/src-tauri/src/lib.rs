@@ -29,9 +29,13 @@ fn to_view(rt: &SiteRuntime, g: GroupInfo) -> GroupView {
     let mut inferred = rt.site.kind == Kind::Newapi;
     let mut clients = if inferred { vec![service::Client::Claude, service::Client::ClaudeDesktop, service::Client::Codex, service::Client::Gemini] } else { service::clients_for(&g.platform) };
     // 用户手动设置过“支持哪些客户端”就以它为准
+    let mut other = false;
     if let Some(list) = overrides::load(&rt.data_dir).get(&overrides::key(&rt.site.id, &g.id)) {
         clients = service::CLIENTS_ORDER.iter().copied().filter(|c| list.iter().any(|x| x == c.id())).collect();
+        other = list.iter().any(|x| x == "other");
         inferred = false;
+    } else if !inferred && clients.is_empty() {
+        other = true; // 站点给了分类，但不属于这四个客户端（比如 Grok）：归到“其他”
     }
     GroupView {
         clients,
@@ -44,6 +48,7 @@ fn to_view(rt: &SiteRuntime, g: GroupInfo) -> GroupView {
         rate_multiplier: g.rate_multiplier,
         models: g.models,
         clients_inferred: inferred,
+        other,
     }
 }
 
@@ -643,7 +648,7 @@ async fn admin_create_group(st: State<'_, AppState>, site_id: String, group: adm
 pub struct AddUpstreamOpts {
     /// 上游账号 / 渠道的名称；空则用“上游站点名-分组名”。
     pub name: Option<String>,
-    /// 创建后先暂停（默认）：确认没问题再点“恢复”才参与调度。
+    /// 创建后先暂停（默认不暂停：调度默认开启，创建完就参与调度；传 true 才先暂停）。
     pub paused: bool,
     /// 这个上游分组已经被添加过时，允许再添加一次：两个上游账号会共用同一把上游 Key，用户会互相占用它的并发和额度。
     pub allow_duplicate: bool,
@@ -668,7 +673,7 @@ fn cheap_model(models: &[String]) -> Option<String> {
 
 /// 站长：给下游分组添加一个上游。流程（任何一步失败都撤销已经做的）：
 /// 1. 在上游站点为这个分组创建（或复用）一把专用 Key；2. 读这把 Key 的模型；3. 用它在上游站点发一句“hi”，证明链路是通的；
-/// 4. 在站长的站点创建上游账号 / 渠道并绑定下游分组（默认先暂停）；5. 记下“这个上游账号 ↔ 上游分组”的关联。
+/// 4. 在站长的站点创建上游账号 / 渠道并绑定下游分组（默认调度开启，不暂停）；5. 记下“这个上游账号 ↔ 上游分组”的关联。
 /// Key 只在内存里从上游站点传到站长的站点，不显示、不写日志、不落盘。
 pub async fn add_upstream(rt: &Arc<SiteRuntime>, urt: &Arc<SiteRuntime>, downstream_id: &str, upstream_group_id: &str, opts: &AddUpstreamOpts, data_dir: &std::path::Path) -> Result<admin::AddedUpstream, String> {
     let overview = rt.client.admin_overview().await?;
@@ -753,7 +758,7 @@ async fn admin_add_upstream(st: State<'_, AppState>, site_id: String, downstream
     if !urt.client.is_logged_in().await {
         return Err(format!("上游站点「{}」需要先重新登录", urt.site.name));
     }
-    add_upstream(&rt, &urt, &downstream_id, &upstream_group_id, &AddUpstreamOpts { name, paused: paused.unwrap_or(true), allow_duplicate: allow_duplicate.unwrap_or(false), test_model }, &st.paths.data).await
+    add_upstream(&rt, &urt, &downstream_id, &upstream_group_id, &AddUpstreamOpts { name, paused: paused.unwrap_or(false), allow_duplicate: allow_duplicate.unwrap_or(false), test_model }, &st.paths.data).await
 }
 
 /// 手动设置某个分组支持哪些客户端（多选）；列表为空表示恢复成站点给的默认分类。
@@ -762,6 +767,12 @@ async fn set_group_clients(st: State<'_, AppState>, site_id: String, group_id: S
     st.find(&site_id).await?;
     let mut parsed: Vec<&str> = vec![];
     for c in &clients {
+        if c == "other" {
+            if !parsed.contains(&"other") {
+                parsed.push("other");
+            }
+            continue;
+        }
         let cl = Client::parse(c)?;
         if !parsed.contains(&cl.id()) {
             parsed.push(cl.id());
@@ -844,7 +855,7 @@ async fn admin_create_downstream(st: State<'_, AppState>, site_id: String, upstr
     applog::log("admin_op", &format!("{} CREATE downstream {:?} from {} / {}", rt.site.name, name, urt.site.name, upstream_group_id));
     let group_id = rt.client.admin_create_group(&group).await?;
     rt.last_groups_at.store(0, std::sync::atomic::Ordering::Relaxed);
-    let added = add_upstream(&rt, &urt, &group_id, &upstream_group_id, &AddUpstreamOpts { name: None, paused: paused.unwrap_or(true), allow_duplicate: true, test_model }, &st.paths.data)
+    let added = add_upstream(&rt, &urt, &group_id, &upstream_group_id, &AddUpstreamOpts { name: None, paused: paused.unwrap_or(false), allow_duplicate: true, test_model }, &st.paths.data)
         .await
         .map_err(|e| format!("下游分组「{}」已经创建，但添加上游失败：{e}。可以到“我的中转站”里重试添加上游", name.trim()))?;
     Ok(CreatedDownstream { group_id, added })

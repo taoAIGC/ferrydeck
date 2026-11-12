@@ -1,4 +1,4 @@
-import type { AccountInfo, Backend, ClientId, ClientOverview, DetectedSite, EnableOutcome, GroupView, SiteKind, SiteView } from "./types";
+import type { AccountInfo, Backend, ClientId, TabId, ClientOverview, DetectedSite, EnableOutcome, GroupView, SiteKind, SiteView } from "./types";
 
 /**
  * 浏览器里（没有 Tauri）使用的模拟后端，用于开发和界面自动化测试。
@@ -56,7 +56,8 @@ const SITE_DEFS: Record<string, { name: string; kind: SiteKind; balance: string;
   "https://gamma.example.com": { name: "Gamma", kind: "newapi", balance: "¥12.30", groups: [g("G1", "Gamma 分组", "anthropic", 1, null)] },
 };
 
-const MODELS: Record<ClientId, string[]> = {
+const MODELS: Record<TabId, string[]> = {
+  other: [],
   claude: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-haiku-5-5"],
   claude_desktop: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-haiku-5-5"],
   codex: ["gpt-5.6-sol", "gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-terra"],
@@ -101,7 +102,7 @@ export function createMockBackend(): Backend {
   // 站长视角的模拟数据（按站点地址保存，操作会真的改它）
   const linkChoice = new Map<string, string>();
   const addedSources = new Set<string>();
-  const clientOverrides = new Map<string, ClientId[]>();
+  const clientOverrides = new Map<string, TabId[]>();
   const downRefs: import("./types").DownstreamRef[] = [];
   const adminData = new Map<string, import("./types").AdminOverview>();
   const adminOf = (url: string) => {
@@ -139,7 +140,7 @@ export function createMockBackend(): Backend {
 
   return {
     async appVersion() {
-      return "0.5.2";
+      return "0.5.3";
     },
     async checkUpdate() {
       await delay();
@@ -252,10 +253,10 @@ export function createMockBackend(): Backend {
       addedSources.add(dupKey);
       if (has("addfail")) throw new Error("用这把 Key 在上游站点试了一次，没通：Insufficient account balance");
       const d = adminOf(urlOf(siteId)!);
-      const up = { id: `a${d.upstreams.length + 1}`, name: name || `${upstreamSiteId}-${upstreamGroupId}`, platform: "anthropic", kind: "apikey", status: (paused ?? true ? "paused" : "active") as "paused" | "active", account_status: "active", schedulable: !(paused ?? true), error: null, host: `${upstreamSiteId}.example.com`, groups: [downstreamId], models: 4, model_names: ["claude-sonnet-5-5", "claude-haiku-5-5"], rate_multiplier: 0.28, priority: 50 };
+      const up = { id: `a${d.upstreams.length + 1}`, name: name || `${upstreamSiteId}-${upstreamGroupId}`, platform: "anthropic", kind: "apikey", status: (paused ?? false ? "paused" : "active") as "paused" | "active", account_status: "active", schedulable: !(paused ?? false), error: null, host: `${upstreamSiteId}.example.com`, groups: [downstreamId], models: 4, model_names: ["claude-sonnet-5-5", "claude-haiku-5-5"], rate_multiplier: 0.28, priority: 50 };
       d.upstreams.push(up);
-      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`add-upstream:${downstreamId}:${upstreamSiteId}:${upstreamGroupId}:${paused ?? true}${testModel ? `:model=${testModel}` : ""}`);
-      return { upstream_id: up.id, name: up.name, key_created: true, models: 4, probe_ms: 820, paused: paused ?? true };
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`add-upstream:${downstreamId}:${upstreamSiteId}:${upstreamGroupId}:${paused ?? false}${testModel ? `:model=${testModel}` : ""}`);
+      return { upstream_id: up.id, name: up.name, key_created: true, models: 4, probe_ms: 820, paused: paused ?? false };
     },
     async setGroupClients(siteId, groupId, clients) {
       await delay();

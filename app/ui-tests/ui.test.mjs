@@ -1906,10 +1906,10 @@ test("站长：给下游分组添加上游——选上游站点和分组，预�
   assert.match(await T(p, "au-group").locator("option").first().textContent(), /· ×/, "分组旁边显示倍率");
   const name = await T(p, "au-name").inputValue();
   assert.match(name, /^Beta-/, `名称默认“站点名-分组名”: ${name}`);
-  assert.equal(await count(p, '[data-testid="au-paused"]'), 0, "不再有“先暂停”选项，默认就是先暂停");
+  assert.equal(await count(p, '[data-testid="au-paused"]'), 0, "没有“先暂停”选项；上游创建后默认调度开启");
   const preview = await T(p, "au-preview").textContent();
   assert.match(preview, /创建（或复用）一把专用 Key.*发一句“hi”试一次/);
-  assert.match(preview, /先把它暂停/);
+  assert.match(preview, /直接启用，马上参与调度/);
   assert.match(preview, /任何一步失败都会撤销/);
   assert.deepEqual(await opsLog(p), [], "点创建之前不会做任何事");
   await T(p, "au-name").fill("我的上游 A");
@@ -1919,13 +1919,11 @@ test("站长：给下游分组添加上游——选上游站点和分组，预�
   assert.match(res, /上游账号「我的上游 A」已创建，绑定到下游分组「Claude 逆向Kiro」/);
   assert.match(res, /读到 4 个可用模型/);
   assert.match(res, /首字时延 0\.82s，链路是通的/);
-  assert.match(res, /现在是暂停状态/);
+  assert.match(res, /已经启用，正在参与调度/);
   assert.equal((await opsLog(p)).length, 1);
-  assert.match((await opsLog(p))[0], /^add-upstream:4:beta:Claude 逆向Kiro:true$/);
+  assert.match((await opsLog(p))[0], /^add-upstream:4:beta:Claude 逆向Kiro:false$/);
   // 启用
-  await T(p, "au-resume").click();
-  await p.waitForFunction(() => /已经启用，正在参与调度|已启用/.test(document.querySelector('[data-testid="add-upstream-result"]')?.textContent ?? "") || !document.querySelector('[data-testid="au-resume"]'));
-  assert.equal((await opsLog(p)).at(-1), "resume:a4");
+  assert.equal(await count(p, '[data-testid="au-resume"]'), 0, "不需要再点“启用”");
   await T(p, "au-done").click();
   await T(p, "add-upstream-dialog").waitFor({ state: "detached" });
   // 新上游出现在这个下游分组的色块里
@@ -2106,7 +2104,7 @@ test("创建下游：选中转站，名称 / 类型默认复用上游分组，�
   assert.equal(await T(p, "md-name").inputValue(), "Claude 官方系列高速", "名称默认用上游分组的");
   assert.equal(await count(p, '[data-testid="md-platform"]'), 0, "new-api 中转站没有客户端类型");
   assert.equal(await T(p, "md-rate").inputValue(), "2.5", "倍率默认是上游的");
-  assert.equal(await count(p, '[data-testid="md-paused"]'), 0, "不再有“先暂停”选项，默认就是先暂停");
+  assert.equal(await count(p, '[data-testid="md-paused"]'), 0, "没有“先暂停”选项；上游创建后默认调度开启");
   await T(p, "md-name").fill("我的下游");
   await T(p, "md-rate").fill("abc");
   await T(p, "md-submit").click();
@@ -2116,8 +2114,8 @@ test("创建下游：选中转站，名称 / 类型默认复用上游分组，�
   await T(p, "md-submit").click();
   await T(p, "makedown-result").waitFor();
   assert.match(await T(p, "makedown-result").textContent(), /创建了下游分组「我的下游」（×3\.5）/);
-  assert.match(await T(p, "makedown-result").textContent(), /上游现在是暂停状态/);
-  assert.equal((await opsLog(p)).at(-1), "create-downstream:beta:alpha:2:我的下游:-:3.5:测试勿用:true");
+  assert.match(await T(p, "makedown-result").textContent(), /上游已经启用，正在参与调度/);
+  assert.equal((await opsLog(p)).at(-1), "create-downstream:beta:alpha:2:我的下游:-:3.5:测试勿用:false");
   await T(p, "md-done").click();
   // 上游分组底部显示下游
   await p.waitForFunction(() => document.querySelector('[data-testid="downs-alpha-2"]'));
@@ -2187,7 +2185,7 @@ test("左侧导航同一时间只有一张卡片处于激活；在中转站管�
 test("检查更新的左边显示当前版本号", async () => {
   const p = await open("sites1");
   await T(p, "app-version").waitFor();
-  assert.equal(await T(p, "app-version").textContent(), "v0.5.2");
+  assert.equal(await T(p, "app-version").textContent(), "v0.5.3");
   const xs = await p.evaluate(() => ["app-version", "check-update"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
   assert.ok(xs[0] < xs[1], `版本号在“检查更新”左边: ${xs}`);
   await done(p);
@@ -2291,7 +2289,7 @@ test("同一个上游分组再添加一次：提示会共用同一把上游 Key�
   await T(p, "au-dup-ok").check();
   await T(p, "au-submit").click();
   await T(p, "add-upstream-result").waitFor();
-  assert.match((await opsLog(p)).at(-1), /^add-upstream:12:beta:Claude 逆向Kiro:true$/);
+  assert.match((await opsLog(p)).at(-1), /^add-upstream:12:beta:Claude 逆向Kiro:false$/);
   await done(p);
 });
 
@@ -2442,7 +2440,7 @@ test("上游账号没关联时：成本和 24h流水也显示可点的“关联�
   const p = await open("sites2,admin");
   await T(p, "operator-alpha").click();
   await T(p, "account-cost-u1").first().waitFor();
-  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]'));
+  await p.waitForFunction(() => !document.querySelector('[data-testid="op-progress"]') && document.querySelector('[data-testid="account-rate-u1"]')?.textContent === "×0.09?"); // 关联信息读到后才有“关联”按钮
   for (const what of ["cost", "tokens"]) {
     const b = T(p, `account-${what}-u1`).first();
     assert.equal(await b.textContent(), "关联");
@@ -2489,5 +2487,34 @@ test("基于上游分组创建下游：除了新建，也可以选择已有的�
   await T(p, "makedown-result").waitFor();
   assert.match(await T(p, "makedown-result").textContent(), /已有的下游分组.*下添加了上游/);
   assert.match((await opsLog(p)).at(-1), new RegExp(`^add-upstream:${target}:alpha:2:`), "走的是添加上游，不是新建分组");
+  await done(p);
+});
+
+test("添加上游 / 创建下游后，上游默认不暂停（调度开启，直接参与调度）", async () => {
+  const p = await open("sites2,admin,plaza");
+  await T(p, "operator-alpha").click();
+  await T(p, "down-addup-4").click({ force: true });
+  await T(p, "au-submit").click();
+  await T(p, "add-upstream-result").waitFor();
+  assert.match(await opsLog(p).then((l) => l.at(-1)), /^add-upstream:.*:false/, "paused = false");
+  assert.match(await T(p, "add-upstream-result").textContent(), /已经启用，正在参与调度/);
+  assert.equal(await count(p, '[data-testid="au-resume"]'), 0, "不需要再点“启用”");
+  await done(p);
+});
+
+test("客户端分类有“其他”：下拉里能选，选了出现“其他”tab，里面的分组不能一键配置", async () => {
+  const p = await open("sites2");
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.equal(await count(p, '[data-testid="client-other"]'), 0, "没有分组归在“其他”时不显示这个 tab");
+  await T(p, "clients-alpha-2").click();
+  assert.match(await T(p, "clients-picker").textContent(), /其他/);
+  await T(p, "ec-other").click();
+  await p.keyboard.press("Escape");
+  await p.waitForFunction(() => /^clients:alpha:2:claude,claude_desktop,other$/.test((window.__adminOps ?? []).at(-1) ?? ""));
+  await T(p, "client-other").waitFor();
+  await T(p, "client-other").click();
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.equal(await count(p, '[data-testid="enable-alpha-2"]'), 0, "“其他”里没有启用按钮");
+  assert.equal(await T(p, "noconfig-alpha-2").textContent(), "不可配置");
   await done(p);
 });

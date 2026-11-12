@@ -3,7 +3,7 @@ import { octopusSpinner, octopusWorking } from "./octopus";
 import { agoText, fullTime, startAgoTicker } from "./time";
 import { initHover, syncHover } from "./hover";
 import { backend, isMock } from "./backend";
-import { CLIENTS, CLIENT_ORDER, KIND_LABEL, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
+import { CLIENTS, CLIENT_ORDER, TAB_ORDER, KIND_LABEL, type TabId, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
 
 type Toast = { kind: "ok" | "err" | "info"; text: string } | null;
 
@@ -208,7 +208,7 @@ const state = {
   sites: [] as SiteView[],
   groups: [] as GroupView[],
   overview: [] as ClientOverview[],
-  selected: "claude" as ClientId,
+  selected: "claude" as TabId,
   siteFilter: "all",
   sort: loadSort(),
   sortCol: loadSortCol(),
@@ -306,7 +306,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
 
 const isAuthError = (m: string) => m.includes("登录已过期") || m === "未登录";
 const gkey = (g: { site_id: string; id: string }) => `${g.site_id}\u0001${g.id}`;
-const ov = (c: ClientId) => state.overview.find((o) => o.client === c);
+const ov = (c: TabId) => state.overview.find((o) => o.client === c);
 const multiSite = () => state.sites.length > 1;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -355,7 +355,7 @@ async function refreshAll(maxAgeSecs = 0, opts: { models?: boolean; forceCosts?:
   render();
   try {
     const [r, overview] = await Promise.all([backend.listGroups(maxAgeSecs), backend.overview()]);
-    state.groups = r.groups;
+    state.groups = r.groups.map((g) => (g.other && !g.clients.includes("other") ? { ...g, clients: [...g.clients, "other" as TabId] } : g));
     state.sites = r.sites;
     state.fetchedAt = r.fetched_at;
     state.overview = overview;
@@ -480,7 +480,7 @@ async function loadActiveModels() {
 
 async function enable(g: GroupView, model?: string | null) {
   const client = state.selected;
-  if (state.busyGroup !== null || !g.clients.includes(client)) return;
+  if (client === "other" || state.busyGroup !== null || !g.clients.includes(client)) return;
   state.busyGroup = gkey(g);
   render();
   try {
@@ -907,8 +907,8 @@ function viewClientTabs(): HTMLElement {
   return el(
     "div",
     { class: "client-tabs", "data-testid": "client-tabs" },
-    ...CLIENT_ORDER.map((c) => {
-      const o = ov(c);
+    ...TAB_ORDER.filter((c) => c !== "other" || state.groups.some((g) => g.clients.includes("other"))).map((c) => {
+      const o = c === "other" ? undefined : ov(c);
       const count = state.groups.filter((g) => g.clients.includes(c)).length;
       const a = o?.in_use ? o.active : null;
       return el(
@@ -1059,7 +1059,7 @@ async function runSpeedTest(list: GroupView[]) {
       state.probing.add(k);
       render();
       try {
-        const r = await backend.probeGroup(g.site_id, g.id, null, c);
+        const r = await backend.probeGroup(g.site_id, g.id, null, realClient(c));
         state.speeds[k] = { first: r.first_ms, total: r.total_ms, model: r.model, input: r.input_tokens ?? null };
         if (r.models.length > 0) state.allModels[k] = r.models;
       } catch (e) {
@@ -1125,9 +1125,12 @@ function moreMenu(g: GroupView, tid: string): HTMLElement {
   );
 }
 
+/** sayhi 要按某个客户端的协议发；“其他”类的分组没有对应客户端，按 Claude Code 的协议试。 */
+const realClient = (c: TabId | undefined): ClientId => (c && c !== "other" ? c : "claude");
+
 function openSayHi(g: GroupView) {
   const models = modelsOf(g).filter((m) => !/image|embed|tts|whisper|rerank/.test(m));
-  state.dialog = { type: "sayhi", g, models, model: models[0] ?? "", client: g.clients.includes(state.selected) ? state.selected : (g.clients[0] ?? state.selected), busy: false, error: "", results: [] };
+  state.dialog = { type: "sayhi", g, models, model: models[0] ?? "", client: realClient(g.clients.includes(state.selected) ? state.selected : g.clients[0]), busy: false, error: "", results: [] };
   render();
 }
 
@@ -1153,7 +1156,7 @@ async function runSayHi(d: SayHiDialog) {
 function clientsCell(g: GroupView, tid: string): HTMLElement {
   const chosen = g.clients_inferred ? [] : g.clients;
   const names = chosen.map((c) => CLIENTS[c].name);
-  const text = g.clients_inferred ? "未设置" : names.length === CLIENT_ORDER.length ? "全部客户端" : names.length <= 1 ? (names[0] ?? "未设置") : `${names[0]} +${names.length - 1}`;
+  const text = g.clients_inferred ? "未设置" : names.length === CLIENT_ORDER.length && !chosen.includes("other") ? "全部客户端" : names.length <= 1 ? (names[0] ?? "未设置") : `${names[0]} +${names.length - 1}`;
   const tip = g.clients_inferred ? "这个站点没有给分组分类：点击选择它可以配置到哪些客户端（可多选）" : `可以配置到：${names.join("、")}。点击修改（可多选）`;
   return el("button", { class: `clients-pill${g.clients_inferred ? " unset" : ""}`, "data-tip": tip, "data-testid": `clients-${tid}`, onClick: (e: Event) => openClientsPicker(e.currentTarget as HTMLElement, g) }, el("span", { class: "clients-text" }, text), el("span", { class: "caret", "aria-hidden": "true" }, "▾"));
 }
@@ -1164,12 +1167,12 @@ function closeClientsPicker() {
 }
 function openClientsPicker(anchor: HTMLElement, g: GroupView) {
   closeClientsPicker();
-  const initial: ClientId[] = g.clients_inferred ? [] : [...g.clients];
-  const selected = new Set<ClientId>(initial);
+  const initial: TabId[] = g.clients_inferred ? [] : [...g.clients];
+  const selected = new Set<TabId>(initial);
   const m = document.createElement("div");
   m.className = "clients-picker";
   m.setAttribute("data-testid", "clients-picker");
-  for (const c of CLIENT_ORDER) {
+  for (const c of TAB_ORDER) {
     const label = document.createElement("label");
     label.className = "check-row";
     const box = document.createElement("input");
@@ -1197,13 +1200,13 @@ function openClientsPicker(anchor: HTMLElement, g: GroupView) {
     document.removeEventListener("keydown", onKey, true);
     m.remove();
     clientsPickerClose = null;
-    const now = CLIENT_ORDER.filter((c) => selected.has(c));
+    const now = TAB_ORDER.filter((c) => selected.has(c));
     const changed = now.length !== initial.length || now.some((c) => !initial.includes(c));
     if (changed) void saveClients(g, now);
   };
 }
 
-async function saveClients(g: GroupView, clients: ClientId[]) {
+async function saveClients(g: GroupView, clients: TabId[]) {
   try {
     await backend.setGroupClients(g.site_id, g.id, clients);
     showToast("ok", clients.length ? `已把「${g.name}」设为支持：${clients.map((c) => CLIENTS[c].name).join("、")}` : `「${g.name}」已恢复成站点给的默认分类`);
@@ -1216,7 +1219,7 @@ async function saveClients(g: GroupView, clients: ClientId[]) {
 function openMakeDownstream(g: GroupView) {
   const first = state.sites.find((x) => x.is_admin && x.id !== g.site_id && x.connected);
   const known = ["anthropic", "openai", "gemini", "grok", "antigravity"].includes(g.platform);
-  state.dialog = { type: "make-downstream", g, siteId: first?.id ?? "", name: g.name, platform: known ? g.platform : "anthropic", rate: String(g.rate_multiplier), description: "", paused: true, testModel: "", mode: "new", existingId: "", busy: false, error: "", done: null };
+  state.dialog = { type: "make-downstream", g, siteId: first?.id ?? "", name: g.name, platform: known ? g.platform : "anthropic", rate: String(g.rate_multiplier), description: "", paused: false, testModel: "", mode: "new", existingId: "", busy: false, error: "", done: null };
   if (first) void loadAdminLight(first.id); // “选择已有分组”要用到它的下游分组列表
   render();
 }
@@ -1231,7 +1234,7 @@ async function submitMakeDownstream(d: MakeDownstreamDialog) {
     d.error = "";
     render();
     try {
-      const added = await backend.adminAddUpstream(d.siteId, d.existingId, d.g.site_id, d.g.id, undefined, true, false, d.testModel || undefined);
+      const added = await backend.adminAddUpstream(d.siteId, d.existingId, d.g.site_id, d.g.id, undefined, false, false, d.testModel || undefined);
       d.done = { group_id: d.existingId, added };
       d.busy = false;
       render();
@@ -1250,7 +1253,7 @@ async function submitMakeDownstream(d: MakeDownstreamDialog) {
   d.error = "";
   render();
   try {
-    d.done = await backend.adminCreateDownstream(d.siteId, d.g.site_id, d.g.id, d.name.trim(), own?.kind === "sub2api" ? d.platform : undefined, rate, d.description.trim() || undefined, true, d.testModel || undefined);
+    d.done = await backend.adminCreateDownstream(d.siteId, d.g.site_id, d.g.id, d.name.trim(), own?.kind === "sub2api" ? d.platform : undefined, rate, d.description.trim() || undefined, false, d.testModel || undefined);
     d.busy = false;
     render();
     void loadDownstreamRefs(); // 上游分组底下马上出现这个下游
@@ -1273,7 +1276,9 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
   const tid = `${g.site_id}-${g.id}`;
   const sp = state.speeds[k];
   // 操作列：使用中只显示文案，否则是启用按钮
-  const control = isActive
+  const control = state.selected === "other"
+    ? el("span", { class: "muted small", "data-tip": "这个分组归在“其他”：它的用途不在 Claude Code / Claude Desktop / Codex / Gemini CLI 里，只能归类查看，不能一键配置。要配置的话，到“客户端”列里勾选对应的客户端", "data-testid": `noconfig-${tid}` }, "不可配置")
+    : isActive
     ? el("span", { class: "badge" }, "使用中")
     : el("button", { class: `enable-btn${busy ? " busy" : ""}`, "aria-label": "启用", title: "启用", "data-testid": `enable-${tid}`, disabled: state.busyGroup !== null, onClick: () => void enable(g) }, ...(busy ? [octopusWorking(), "配置中…"] : [powerIcon()]));
   // 站点用量记录里的真实首字时延（中位数）比本地测速更准，有就用它，没有才显示本地测速的结果
@@ -1654,7 +1659,7 @@ function openAddUpstream(siteId: string, down: Downstream, replace: Upstream | n
   const first = (cur?.site_id ? upstreamSites(siteId).find((x) => x.id === cur.site_id && x.connected) : undefined) ?? upstreamSites(siteId).find((x) => x.connected);
   // 已关联的用关联的分组；还没关联但有推荐（名称里的倍率对得上）的，预选推荐的
   const gid = cur?.group_id && first?.id === cur.site_id ? cur.group_id : cur?.suggested && first?.id === cur.site_id ? cur.suggested.id : first ? (groupsOfSite(first.id)[0]?.id ?? "") : "";
-  const d: AdminAddUpstreamDialog = { type: "admin-add-upstream", siteId, down, upSiteId: first?.id ?? "", groupId: gid, name: replace?.name ?? "", nameEdited: !!replace, paused: true, busy: false, error: "", done: null, replace, dupOk: false, testModel: "", tab: "source" };
+  const d: AdminAddUpstreamDialog = { type: "admin-add-upstream", siteId, down, upSiteId: first?.id ?? "", groupId: gid, name: replace?.name ?? "", nameEdited: !!replace, paused: false, busy: false, error: "", done: null, replace, dupOk: false, testModel: "", tab: "source" };
   defaultUpstreamName(d);
   state.dialog = d;
   render();
@@ -1684,7 +1689,7 @@ async function submitAddUpstream(d: AdminAddUpstreamDialog) {
   try {
     d.done = d.replace
       ? await backend.adminReplaceUpstream(d.siteId, d.replace.id, d.upSiteId, d.groupId, d.name.trim() === d.replace.name ? undefined : d.name.trim(), d.testModel || undefined)
-      : await backend.adminAddUpstream(d.siteId, d.down.id, d.upSiteId, d.groupId, d.name.trim(), true, d.dupOk, d.testModel || undefined);
+      : await backend.adminAddUpstream(d.siteId, d.down.id, d.upSiteId, d.groupId, d.name.trim(), false, d.dupOk, d.testModel || undefined);
     // 换了上游分组：之前读到的真实账单是旧分组的，作废，免得 10 分钟缓存期内还显示旧数字
     if (d.replace) delete state.adminBill[adminKey(d.siteId, "account", d.replace.id)];
     d.busy = false;
@@ -2185,7 +2190,7 @@ function viewMenuDialog(d: SayHiDialog | MakeDownstreamDialog): HTMLElement {
                 el("input", { id: "md-desc", type: "text", value: d.description, disabled: d.busy, "data-testid": "md-desc", onInput: (e: Event) => (d.description = (e.target as HTMLInputElement).value) }),
                 ]
               : []),
-            el("p", { class: "muted small" }, d.mode === "existing" ? `点“添加”后：在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到选中的下游分组（默认暂停）。任何一步失败会撤销上游的部分。` : `点“创建”后：在中转站创建下游分组 → 在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到这个下游分组。任何一步失败会撤销上游的部分；下游分组一旦创建会保留。`),
+            el("p", { class: "muted small" }, d.mode === "existing" ? `点“添加”后：在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到选中的下游分组（调度默认开启，上游马上参与分配用户请求）。任何一步失败会撤销上游的部分。` : `点“创建”后：在中转站创建下游分组 → 在「${d.g.site_name}」为「${d.g.name}」创建（或复用）专用 Key 并发一句“hi”试一次 → 在中转站创建上游账号并绑定到这个下游分组。任何一步失败会撤销上游的部分；下游分组一旦创建会保留。`),
           ),
       el("div", { class: "error", role: "alert", "data-testid": "md-error" }, d.error),
       el("div", { class: "modal-actions" }, el("button", { type: "button", class: "ghost", "data-testid": "md-cancel", disabled: d.busy, onClick: close }, "取消"), admins.length ? el("button", { type: "submit", class: "primary", "data-testid": "md-submit", disabled: d.busy }, d.busy ? "处理中…（要建 Key 并试一次，稍等）" : d.mode === "existing" ? "添加" : "创建") : null),

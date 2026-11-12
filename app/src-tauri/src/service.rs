@@ -101,6 +101,8 @@ pub struct GroupView {
     pub models: Vec<String>,
     /// 这个站点的分组没有平台分类，`clients` 是按模型推断出来的。
     pub clients_inferred: bool,
+    /// 归在“其他”：用途不在四个客户端里（用户手动选了“其他”，或站点的分类不属于这四个客户端且没手动设置过）。只能归类查看，不能一键配置。
+    pub other: bool,
 }
 
 #[derive(Debug, Serialize)]

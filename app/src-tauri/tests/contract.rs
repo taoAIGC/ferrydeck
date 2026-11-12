@@ -12,9 +12,9 @@ fn keys(v: &Value) -> Vec<String> {
 
 #[test]
 fn group_view_matches_frontend_type() {
-    let g = GroupView { site_id: "s".into(), site_name: "S".into(), id: "1".into(), name: "n".into(), description: None, platform: "anthropic".into(), rate_multiplier: 0.5, clients: vec![Client::Claude, Client::ClaudeDesktop], models: vec![], clients_inferred: false };
+    let g = GroupView { site_id: "s".into(), site_name: "S".into(), id: "1".into(), name: "n".into(), description: None, platform: "anthropic".into(), rate_multiplier: 0.5, clients: vec![Client::Claude, Client::ClaudeDesktop], models: vec![], clients_inferred: false, other: false };
     let v = serde_json::to_value(&g).unwrap();
-    assert_eq!(keys(&v), ["clients", "clients_inferred", "description", "id", "models", "name", "platform", "rate_multiplier", "site_id", "site_name"]);
+    assert_eq!(keys(&v), ["clients", "clients_inferred", "description", "id", "models", "name", "other", "platform", "rate_multiplier", "site_id", "site_name"]);
     assert_eq!(v["clients"], json!(["claude", "claude_desktop"]));
     assert_eq!(v["description"], Value::Null);
     let none = serde_json::to_value(GroupView { clients: vec![], ..g }).unwrap();

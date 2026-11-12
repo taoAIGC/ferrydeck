@@ -1,7 +1,10 @@
 export type ClientId = "claude" | "claude_desktop" | "codex" | "gemini";
+/** 客户端 tab：四个能一键配置的客户端，加上“其他”（分组的用途不在这四个里，只能归类，不能一键配置） */
+export type TabId = ClientId | "other";
 
 /** 侧边栏显示顺序 */
 export const CLIENT_ORDER: ClientId[] = ["claude", "claude_desktop", "codex", "gemini"];
+export const TAB_ORDER: TabId[] = [...CLIENT_ORDER, "other"];
 
 export type SiteKind = "sub2api" | "newapi";
 
@@ -41,7 +44,9 @@ export interface GroupView {
   platform: string;
   rate_multiplier: number;
   /** 可配置的客户端；空数组表示暂不支持一键配置 */
-  clients: ClientId[];
+  clients: TabId[];
+  /** 后端给的“其他”标记；前端会把它并进 `clients` */
+  other?: boolean;
   /** 分组已自带的模型（sub2api 不提供，前端额外拉取） */
   models: string[];
   /** 站点的分组没有平台分类，`clients` 是按模型推断的 */
@@ -313,7 +318,7 @@ export interface Backend {
   adminReplaceUpstream(siteId: string, upstreamId: string, upstreamSiteId: string, upstreamGroupId: string, name?: string, testModel?: string): Promise<AddedUpstream>;
   adminSetAccountState(siteId: string, upstreamId: string, status?: "active" | "inactive" | "error", schedulable?: boolean): Promise<void>;
   adminRemoveGroup(siteId: string, groupId: string): Promise<void>;
-  setGroupClients(siteId: string, groupId: string, clients: ClientId[]): Promise<void>;
+  setGroupClients(siteId: string, groupId: string, clients: TabId[]): Promise<void>;
   sayHi(siteId: string, groupId: string, model?: string | null, client?: ClientId): Promise<SayHi>;
   adminCreateDownstream(siteId: string, upstreamSiteId: string, upstreamGroupId: string, name: string, platform: string | undefined, rate: number, description: string | undefined, paused: boolean, testModel?: string): Promise<CreatedDownstream>;
   adminDownstreams(): Promise<DownstreamRef[]>;
@@ -326,7 +331,8 @@ export interface Backend {
   openUrl(url: string): Promise<void>;
 }
 
-export const CLIENTS: Record<ClientId, { name: string; restartHint: string }> = {
+export const CLIENTS: Record<TabId, { name: string; restartHint: string }> = {
+  other: { name: "其他", restartHint: "" },
   claude: { name: "Claude Code", restartHint: "请重新打开终端里的 claude 后生效" },
   claude_desktop: { name: "Claude Desktop", restartHint: "请完全退出（⌘Q）并重新打开 Claude Desktop 后生效" },
   codex: { name: "Codex", restartHint: "请重新打开终端里的 codex 后生效" },
