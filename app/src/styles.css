@@ -469,3 +469,24 @@ button.seg.on { background: var(--info-bg); color: var(--text); border-color: va
 .clients-pill .caret { font-size: 10px; opacity: .7; }
 .clients-picker { position: fixed; z-index: 1100; width: 240px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.3); display: flex; flex-direction: column; gap: 6px; }
 .clients-picker .check-row { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+
+/* 客户端使用状态条（只读）和类别列 */
+.client-status-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.client-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: var(--fs-s); max-width: 280px; }
+.client-chip .chip-name { font-weight: 700; white-space: nowrap; }
+.client-chip .chip-sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.client-chip.on { border-color: var(--accent-fg); }
+.client-chip.on .chip-sub { color: var(--text); }
+.clients-pill.auto { background: transparent; border: 1px dashed var(--line); font-weight: 500; }
+
+.badge.partial { border: 0; cursor: pointer; font: inherit; }
+
+/* 自定义类别 */
+.cat-rows { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; max-height: 46vh; overflow-y: auto; }
+.cat-row { display: flex; gap: 8px; align-items: center; }
+.cat-row input { flex: 1; min-width: 0; }
+.cat-row input:first-child { flex: 0 0 150px; }
+.side-item.add-cat { flex: none; min-width: 0; width: auto; align-self: stretch; justify-content: center; color: var(--muted); border-style: dashed; }
+
+/* “不可配置”占满操作列的一行，不换行 */
+.card-action .muted.small { white-space: nowrap; font-size: var(--fs-s); }

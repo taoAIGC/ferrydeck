@@ -43,6 +43,54 @@ impl Client {
 /// 界面里客户端的固定顺序。
 pub const CLIENTS_ORDER: [Client; 4] = [Client::Claude, Client::ClaudeDesktop, Client::Codex, Client::Gemini];
 
+/// 分组的模型类别：界面上的 tab 和“类别”列按它分。只有前三类对应能一键配置的客户端。
+pub const CATEGORIES: [&str; 10] = ["claude", "openai", "gemini", "deepseek", "cn", "image", "video", "audio", "embed", "other"];
+
+/// 类别 → 可以配置到哪些客户端（没有对应客户端的类别返回空）。
+pub fn clients_for_category(c: &str) -> Vec<Client> {
+    match c {
+        "claude" => vec![Client::Claude, Client::ClaudeDesktop],
+        "openai" => vec![Client::Codex],
+        "gemini" => vec![Client::Gemini],
+        _ => vec![],
+    }
+}
+
+/// 兼容旧版本保存的“客户端”设置：客户端 id 换算成类别，类别原样保留，认不出的丢掉。去重并按 `CATEGORIES` 排序。
+pub fn normalize_categories(list: &[String]) -> Vec<String> {
+    let mut out: Vec<&'static str> = vec![];
+    let mut custom: Vec<String> = vec![];
+    for x in list {
+        let c = match x.as_str() {
+            "claude" | "claude_desktop" => "claude",
+            "codex" => "openai",
+            "gemini" => "gemini",
+            other => match CATEGORIES.iter().find(|c| **c == other) {
+                Some(c) => *c,
+                None => {
+                    // 自定义类别（id 以 c_ 开头）原样保留，排在内置类别后面
+                    if other.starts_with("c_") && !custom.contains(&other.to_string()) {
+                        custom.push(other.to_string());
+                    }
+                    continue;
+                }
+            },
+        };
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    let mut v: Vec<String> = CATEGORIES.iter().filter(|c| out.contains(c)).map(|c| c.to_string()).collect();
+    v.extend(custom);
+    v
+}
+
+/// 一组类别可以配置到哪些客户端（按界面固定顺序）。
+pub fn clients_for_categories(cats: &[String]) -> Vec<Client> {
+    let all: Vec<Client> = cats.iter().flat_map(|c| clients_for_category(c)).collect();
+    CLIENTS_ORDER.iter().copied().filter(|c| all.contains(c)).collect()
+}
+
 pub fn clients_for(platform: &str) -> Vec<Client> {
     match platform {
         "anthropic" => vec![Client::Claude, Client::ClaudeDesktop],
@@ -101,8 +149,8 @@ pub struct GroupView {
     pub models: Vec<String>,
     /// 这个站点的分组没有平台分类，`clients` 是按模型推断出来的。
     pub clients_inferred: bool,
-    /// 归在“其他”：用途不在四个客户端里（用户手动选了“其他”，或站点的分类不属于这四个客户端且没手动设置过）。只能归类查看，不能一键配置。
-    pub other: bool,
+    /// 用户手动设置过的模型类别（见 `CATEGORIES`）；没设置过是 None，界面按平台和模型名自动识别。
+    pub categories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,4 +312,24 @@ pub fn overview(paths: &Paths) -> Vec<ClientOverview> {
             ClientOverview { client: c, dir_exists: dir.exists(), in_use: on, active: if on { act.get(&c).cloned() } else { None }, conflicts: conflicts(paths, c), groups_inferred: false }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_client_ids_become_categories() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(normalize_categories(&s(&["claude_desktop", "codex", "claude", "other", "nope"])), s(&["claude", "openai", "other"]));
+        assert_eq!(normalize_categories(&s(&["video", "deepseek"])), s(&["deepseek", "video"]));
+        assert!(normalize_categories(&s(&[])).is_empty());
+    }
+
+    #[test]
+    fn only_claude_openai_gemini_categories_have_clients() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(clients_for_categories(&s(&["claude", "openai"])), vec![Client::Claude, Client::ClaudeDesktop, Client::Codex]);
+        assert!(clients_for_categories(&s(&["deepseek", "video", "audio", "other"])).is_empty());
+    }
 }

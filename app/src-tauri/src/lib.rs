@@ -29,13 +29,12 @@ fn to_view(rt: &SiteRuntime, g: GroupInfo) -> GroupView {
     let mut inferred = rt.site.kind == Kind::Newapi;
     let mut clients = if inferred { vec![service::Client::Claude, service::Client::ClaudeDesktop, service::Client::Codex, service::Client::Gemini] } else { service::clients_for(&g.platform) };
     // 用户手动设置过“支持哪些客户端”就以它为准
-    let mut other = false;
+    let mut categories = None;
     if let Some(list) = overrides::load(&rt.data_dir).get(&overrides::key(&rt.site.id, &g.id)) {
-        clients = service::CLIENTS_ORDER.iter().copied().filter(|c| list.iter().any(|x| x == c.id())).collect();
-        other = list.iter().any(|x| x == "other");
+        let cats = service::normalize_categories(list);
+        clients = service::clients_for_categories(&cats);
+        categories = Some(cats);
         inferred = false;
-    } else if !inferred && clients.is_empty() {
-        other = true; // 站点给了分类，但不属于这四个客户端（比如 Grok）：归到“其他”
     }
     GroupView {
         clients,
@@ -48,7 +47,7 @@ fn to_view(rt: &SiteRuntime, g: GroupInfo) -> GroupView {
         rate_multiplier: g.rate_multiplier,
         models: g.models,
         clients_inferred: inferred,
-        other,
+        categories,
     }
 }
 
@@ -492,7 +491,7 @@ fn overview(st: State<'_, AppState>) -> Vec<service::ClientOverview> {
 async fn enable_group(app: AppHandle, st: State<'_, AppState>, site_id: String, group_id: String, client: String, model: Option<String>) -> Result<service::EnableOutcome, String> {
     let rt = st.find(&site_id).await?;
     let g = find_group(&rt, &group_id).await?;
-    let ov = overrides::load(&st.paths.data).get(&overrides::key(&site_id, &group_id)).map(|l| service::CLIENTS_ORDER.iter().copied().filter(|c| l.iter().any(|x| x == c.id())).collect::<Vec<_>>());
+    let ov = overrides::load(&st.paths.data).get(&overrides::key(&site_id, &group_id)).map(|l| service::clients_for_categories(&service::normalize_categories(l)));
     let out = service::enable_with(&rt.client, &rt.site, &st.paths, &g, Client::parse(&client)?, model, ov.as_deref()).await;
     if let Err(e) = &out {
         if sites::is_expired(e) {
@@ -761,29 +760,47 @@ async fn admin_add_upstream(st: State<'_, AppState>, site_id: String, downstream
     add_upstream(&rt, &urt, &downstream_id, &upstream_group_id, &AddUpstreamOpts { name, paused: paused.unwrap_or(false), allow_duplicate: allow_duplicate.unwrap_or(false), test_model }, &st.paths.data).await
 }
 
-/// 手动设置某个分组支持哪些客户端（多选）；列表为空表示恢复成站点给的默认分类。
+/// 用户自定义的模型类别（名称 + 模型名关键词）。
+#[tauri::command]
+fn get_custom_categories(st: State<'_, AppState>) -> Vec<overrides::CustomCategory> {
+    overrides::load_custom(&st.paths.data)
+}
+
+/// 保存自定义类别（整个列表一起提交）。删掉的类别，也从各分组手动设置的类别里去掉。
+#[tauri::command]
+fn save_custom_categories(st: State<'_, AppState>, categories: Vec<overrides::CustomCategory>) -> Result<Vec<overrides::CustomCategory>, String> {
+    let names: Vec<&str> = vec!["全部", "Claude", "OpenAI", "Gemini", "DeepSeek", "国产文本", "图像", "视频", "音频", "嵌入与重排", "其他"];
+    let cleaned = overrides::clean_custom(categories, &names)?;
+    overrides::save_custom(&st.paths.data, &cleaned)?;
+    let mut o = overrides::load(&st.paths.data);
+    let before = o.clone();
+    for list in o.values_mut() {
+        list.retain(|x| !x.starts_with("c_") || cleaned.iter().any(|c| &c.id == x));
+    }
+    o.retain(|_, l| !l.is_empty());
+    if o != before {
+        overrides::save(&st.paths.data, &o)?;
+    }
+    Ok(cleaned)
+}
+
+/// 手动设置某个分组的模型类别（多选，见 `service::CATEGORIES`）；列表为空表示恢复成自动识别。
+/// 也接受旧版本的客户端 id（换算成类别）。类别决定它出现在哪个 tab，以及能一键配置到哪些客户端。
 #[tauri::command]
 async fn set_group_clients(st: State<'_, AppState>, site_id: String, group_id: String, clients: Vec<String>) -> Result<(), String> {
     st.find(&site_id).await?;
-    let mut parsed: Vec<&str> = vec![];
     for c in &clients {
-        if c == "other" {
-            if !parsed.contains(&"other") {
-                parsed.push("other");
-            }
-            continue;
-        }
-        let cl = Client::parse(c)?;
-        if !parsed.contains(&cl.id()) {
-            parsed.push(cl.id());
+        if !service::CATEGORIES.contains(&c.as_str()) && !c.starts_with("c_") && Client::parse(c).is_err() {
+            return Err(format!("未知类别: {c}"));
         }
     }
+    let parsed = service::normalize_categories(&clients);
     let mut o = overrides::load(&st.paths.data);
     let k = overrides::key(&site_id, &group_id);
     if parsed.is_empty() {
         o.remove(&k);
     } else {
-        o.insert(k, parsed.into_iter().map(String::from).collect());
+        o.insert(k, parsed);
     }
     overrides::save(&st.paths.data, &o)?;
     Ok(())
@@ -1205,7 +1222,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![detect_site, add_site, remove_site, load_sites, list_sites, refresh_accounts, list_groups, overview, enable_group, group_models, group_models_map, probe_group, group_usage, admin_overview, admin_replace_upstream, admin_set_account_state, admin_remove_group, set_group_clients, say_hi, admin_create_downstream, admin_downstreams, admin_links, admin_set_link, admin_create_group, admin_add_upstream, admin_usage, admin_set_paused, admin_remove_upstream, admin_update_group, topup_url, selftest_mode, selftest_env, selftest_tray, selftest_report, data_loss, restore_sites, dismiss_data_loss, panel_close, panel_open_main, panel_note, panel_quit])
+        .invoke_handler(tauri::generate_handler![detect_site, add_site, remove_site, load_sites, list_sites, refresh_accounts, list_groups, overview, enable_group, group_models, group_models_map, probe_group, group_usage, admin_overview, admin_replace_upstream, admin_set_account_state, admin_remove_group, set_group_clients, get_custom_categories, save_custom_categories, say_hi, admin_create_downstream, admin_downstreams, admin_links, admin_set_link, admin_create_group, admin_add_upstream, admin_usage, admin_set_paused, admin_remove_upstream, admin_update_group, topup_url, selftest_mode, selftest_env, selftest_tray, selftest_report, data_loss, restore_sites, dismiss_data_loss, panel_close, panel_open_main, panel_note, panel_quit])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

@@ -1,4 +1,4 @@
-import type { AccountInfo, Backend, ClientId, TabId, ClientOverview, DetectedSite, EnableOutcome, GroupView, SiteKind, SiteView } from "./types";
+import type { AccountInfo, Backend, CategoryId, ClientId, CustomCategory, ClientOverview, DetectedSite, EnableOutcome, GroupView, SiteKind, SiteView } from "./types";
 
 /**
  * 浏览器里（没有 Tauri）使用的模拟后端，用于开发和界面自动化测试。
@@ -23,7 +23,7 @@ const has = (s: string) => scenarios.has(s);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const delay = () => sleep(has("slow") ? 1200 : 80);
 
-type MockGroup = Omit<GroupView, "site_id" | "site_name" | "models" | "clients_inferred"> & { models?: string[]; clients_inferred?: boolean };
+type MockGroup = Omit<GroupView, "site_id" | "site_name" | "models" | "clients_inferred" | "categories"> & { models?: string[]; clients_inferred?: boolean; categories?: CategoryId[] | null };
 function g(id: string, name: string, platform: string, rate: number, description: string | null): MockGroup {
   const clients = ({ anthropic: ["claude", "claude_desktop"], openai: ["codex"], gemini: ["gemini"] } as Record<string, ClientId[]>)[platform] ?? [];
   return { id, name, description, platform, rate_multiplier: rate, clients };
@@ -56,8 +56,7 @@ const SITE_DEFS: Record<string, { name: string; kind: SiteKind; balance: string;
   "https://gamma.example.com": { name: "Gamma", kind: "newapi", balance: "¥12.30", groups: [g("G1", "Gamma 分组", "anthropic", 1, null)] },
 };
 
-const MODELS: Record<TabId, string[]> = {
-  other: [],
+const MODELS: Record<ClientId, string[]> = {
   claude: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-haiku-5-5"],
   claude_desktop: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-haiku-5-5"],
   codex: ["gpt-5.6-sol", "gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-terra"],
@@ -102,7 +101,8 @@ export function createMockBackend(): Backend {
   // 站长视角的模拟数据（按站点地址保存，操作会真的改它）
   const linkChoice = new Map<string, string>();
   const addedSources = new Set<string>();
-  const clientOverrides = new Map<string, TabId[]>();
+  const clientOverrides = new Map<string, CategoryId[]>();
+  let customCats: CustomCategory[] = [];
   const downRefs: import("./types").DownstreamRef[] = [];
   const adminData = new Map<string, import("./types").AdminOverview>();
   const adminOf = (url: string) => {
@@ -140,7 +140,7 @@ export function createMockBackend(): Backend {
 
   return {
     async appVersion() {
-      return "0.5.3";
+      return "0.5.4";
     },
     async checkUpdate() {
       await delay();
@@ -257,6 +257,24 @@ export function createMockBackend(): Backend {
       d.upstreams.push(up);
       ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`add-upstream:${downstreamId}:${upstreamSiteId}:${upstreamGroupId}:${paused ?? false}${testModel ? `:model=${testModel}` : ""}`);
       return { upstream_id: up.id, name: up.name, key_created: true, models: 4, probe_ms: 820, paused: paused ?? false };
+    },
+    async getCustomCategories() {
+      await delay();
+      return customCats.map((c) => ({ ...c, keywords: [...c.keywords] }));
+    },
+    async saveCustomCategories(categories) {
+      await delay();
+      const names = ["全部", "Claude", "OpenAI", "Gemini", "DeepSeek", "国产文本", "图像", "视频", "音频", "嵌入与重排", "其他"];
+      const out: CustomCategory[] = [];
+      for (const c of categories) {
+        const name = c.name.trim();
+        if (!name) throw new Error("类别名称不能为空");
+        if (names.includes(name) || out.some((o) => o.name === name)) throw new Error(`已经有名为「${name}」的类别`);
+        out.push({ id: c.id.startsWith("c_") ? c.id : `c_${Date.now()}_${out.length}`, name, keywords: [...new Set(c.keywords.map((k) => k.trim().toLowerCase()).filter(Boolean))] });
+      }
+      customCats = out;
+      ((window as unknown as { __adminOps?: string[] }).__adminOps ??= []).push(`custom-categories:${out.map((c) => `${c.name}=${c.keywords.join("|")}`).join(";")}`);
+      return out;
     },
     async setGroupClients(siteId, groupId, clients) {
       await delay();
@@ -395,7 +413,22 @@ export function createMockBackend(): Backend {
       for (const u of urls) {
         if (!connected.get(u) || offline.has(u)) continue;
         const v = view(u);
-        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, models: x.models ?? (has("plaza") ? (SITE_DEFS[u].kind === "sub2api" ? (x.clients.length > 0 ? MODELS[x.clients[0]] : []) : ["beta-only-model", "claude-sonnet-5-5"]) : []), clients_inferred: x.clients_inferred ?? SITE_DEFS[u].kind === "newapi", site_id: v.id, site_name: v.name, clients: clientOverrides.get(`${v.id}|${x.id}`) ?? x.clients })));
+        if (!has("empty")) groups.push(...SITE_DEFS[u].groups.map((x) => ({ ...x, models: x.models ?? (has("plaza") ? (SITE_DEFS[u].kind === "sub2api" ? (x.clients.length > 0 ? MODELS[x.clients[0]] : []) : ["beta-only-model", "claude-sonnet-5-5"]) : []), clients_inferred: x.clients_inferred ?? SITE_DEFS[u].kind === "newapi", site_id: v.id, site_name: v.name, ...(() => {
+          // 和真实后端一致：手动设置过类别就以它为准，可配置的客户端由类别换算
+          const cats = clientOverrides.get(`${v.id}|${x.id}`);
+          if (!cats) return { clients: x.clients, categories: null };
+          const cl: ClientId[] = [];
+          if (cats.includes("claude")) cl.push("claude", "claude_desktop");
+          if (cats.includes("openai")) cl.push("codex");
+          if (cats.includes("gemini")) cl.push("gemini");
+          return { clients: cl, categories: cats };
+        })() })));
+      }
+      // media 场景：再加几个各种模型的分组，验证按模型名自动识别类别（只在 Alpha 上）
+      if (has("media") && !has("empty") && urls[0] && connected.get(urls[0]) && !offline.has(urls[0])) {
+        const v = view(urls[0]);
+        const mk = (id: string, name: string, models: string[]): GroupView => ({ id, name, description: null, platform: "", rate_multiplier: 1, clients: [], clients_inferred: false, categories: clientOverrides.get(`${v.id}|${id}`) ?? null, models, site_id: v.id, site_name: v.name });
+        groups.push(mk("31", "DeepSeek 官方", ["deepseek-chat", "deepseek-reasoner"]), mk("32", "Seedance 视频", ["seedance-1-0-pro", "veo-3"]), mk("33", "语音合成", ["tts-1", "whisper-1"]), mk("34", "混合分组", ["claude-sonnet-5-5", "gpt-5", "deepseek-chat"]));
       }
       return { groups, sites: urls.map(view), fetched_at: lastFetch };
     },

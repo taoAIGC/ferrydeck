@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.5.3"
+version = "0.5.4"
 description = "Ferrydeck：把多个中转站的分组一键配置到 Claude Code / Claude Desktop / Codex / Gemini CLI"
 edition = "2024"
 license = "MIT"

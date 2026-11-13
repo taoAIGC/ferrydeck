@@ -1,10 +1,30 @@
 export type ClientId = "claude" | "claude_desktop" | "codex" | "gemini";
-/** 客户端 tab：四个能一键配置的客户端，加上“其他”（分组的用途不在这四个里，只能归类，不能一键配置） */
-export type TabId = ClientId | "other";
+/** 分组的模型类别：tab 和“类别”列按它分。前三类对应能一键配置的客户端，其余只能归类查看 */
+/** 内置类别（claude / openai / gemini / deepseek / cn / image / video / audio / embed / other）或用户自定义类别（id 以 c_ 开头） */
+export type CategoryId = string;
+/** 用户自定义的模型类别：名称 + 模型名里包含的关键词（任一命中就归进这一类） */
+export interface CustomCategory {
+  id: string;
+  name: string;
+  keywords: string[];
+}
+export type TabId = CategoryId | "all";
+export const BUILTIN_CATEGORIES: { id: CategoryId; name: string; tip: string }[] = [
+  { id: "claude", name: "Claude", tip: "Claude 系列模型，可配置到 Claude Code / Claude Desktop" },
+  { id: "openai", name: "OpenAI", tip: "GPT / o 系列模型，可配置到 Codex" },
+  { id: "gemini", name: "Gemini", tip: "Gemini 系列模型，可配置到 Gemini CLI" },
+  { id: "deepseek", name: "DeepSeek", tip: "DeepSeek 系列模型" },
+  { id: "cn", name: "国产文本", tip: "Kimi、GLM、Qwen、文心、豆包、混元、MiniMax 等文本模型" },
+  { id: "image", name: "图像", tip: "绘图 / 图像生成与编辑模型" },
+  { id: "video", name: "视频", tip: "视频生成模型（Sora、Veo、Seedance、可灵等）" },
+  { id: "audio", name: "音频", tip: "语音合成 / 识别、音乐生成模型" },
+  { id: "embed", name: "嵌入与重排", tip: "Embedding、Rerank 模型" },
+  { id: "other", name: "其他", tip: "识别不出类别，或不属于以上类别" },
+];
+
 
 /** 侧边栏显示顺序 */
 export const CLIENT_ORDER: ClientId[] = ["claude", "claude_desktop", "codex", "gemini"];
-export const TAB_ORDER: TabId[] = [...CLIENT_ORDER, "other"];
 
 export type SiteKind = "sub2api" | "newapi";
 
@@ -44,9 +64,9 @@ export interface GroupView {
   platform: string;
   rate_multiplier: number;
   /** 可配置的客户端；空数组表示暂不支持一键配置 */
-  clients: TabId[];
-  /** 后端给的“其他”标记；前端会把它并进 `clients` */
-  other?: boolean;
+  clients: ClientId[];
+  /** 手动设置过的模型类别；没有就按平台和模型名自动识别 */
+  categories?: CategoryId[] | null;
   /** 分组已自带的模型（sub2api 不提供，前端额外拉取） */
   models: string[];
   /** 站点的分组没有平台分类，`clients` 是按模型推断的 */
@@ -318,7 +338,9 @@ export interface Backend {
   adminReplaceUpstream(siteId: string, upstreamId: string, upstreamSiteId: string, upstreamGroupId: string, name?: string, testModel?: string): Promise<AddedUpstream>;
   adminSetAccountState(siteId: string, upstreamId: string, status?: "active" | "inactive" | "error", schedulable?: boolean): Promise<void>;
   adminRemoveGroup(siteId: string, groupId: string): Promise<void>;
-  setGroupClients(siteId: string, groupId: string, clients: TabId[]): Promise<void>;
+  setGroupClients(siteId: string, groupId: string, categories: CategoryId[]): Promise<void>;
+  getCustomCategories(): Promise<CustomCategory[]>;
+  saveCustomCategories(categories: CustomCategory[]): Promise<CustomCategory[]>;
   sayHi(siteId: string, groupId: string, model?: string | null, client?: ClientId): Promise<SayHi>;
   adminCreateDownstream(siteId: string, upstreamSiteId: string, upstreamGroupId: string, name: string, platform: string | undefined, rate: number, description: string | undefined, paused: boolean, testModel?: string): Promise<CreatedDownstream>;
   adminDownstreams(): Promise<DownstreamRef[]>;
@@ -331,8 +353,7 @@ export interface Backend {
   openUrl(url: string): Promise<void>;
 }
 
-export const CLIENTS: Record<TabId, { name: string; restartHint: string }> = {
-  other: { name: "其他", restartHint: "" },
+export const CLIENTS: Record<ClientId, { name: string; restartHint: string }> = {
   claude: { name: "Claude Code", restartHint: "请重新打开终端里的 claude 后生效" },
   claude_desktop: { name: "Claude Desktop", restartHint: "请完全退出（⌘Q）并重新打开 Claude Desktop 后生效" },
   codex: { name: "Codex", restartHint: "请重新打开终端里的 codex 后生效" },

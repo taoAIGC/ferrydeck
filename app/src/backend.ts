@@ -50,6 +50,8 @@ function createTauriBackend(): Backend {
     adminSetAccountState: (siteId, upstreamId, status, schedulable) => wrap(invoke("admin_set_account_state", { siteId, upstreamId, status: status ?? null, schedulable: schedulable ?? null })),
     adminRemoveGroup: (siteId, groupId) => wrap(invoke("admin_remove_group", { siteId, groupId })),
     setGroupClients: (siteId, groupId, clients) => wrap(invoke("set_group_clients", { siteId, groupId, clients })),
+    getCustomCategories: () => wrap(invoke("get_custom_categories")),
+    saveCustomCategories: (categories) => wrap(invoke("save_custom_categories", { categories })),
     sayHi: (siteId, groupId, model, client) => wrap(invoke("say_hi", { siteId, groupId, model: model ?? null, client: client ?? null })),
     adminCreateDownstream: (siteId, upstreamSiteId, upstreamGroupId, name, platform, rate, description, paused, testModel) => wrap(invoke("admin_create_downstream", { siteId, upstreamSiteId, upstreamGroupId, name, platform: platform ?? null, rate, description: description ?? null, paused, testModel: testModel ?? null })),
     adminDownstreams: () => wrap(invoke("admin_downstreams")),

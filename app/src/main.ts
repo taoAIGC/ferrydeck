@@ -3,7 +3,7 @@ import { octopusSpinner, octopusWorking } from "./octopus";
 import { agoText, fullTime, startAgoTicker } from "./time";
 import { initHover, syncHover } from "./hover";
 import { backend, isMock } from "./backend";
-import { CLIENTS, CLIENT_ORDER, TAB_ORDER, KIND_LABEL, type TabId, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
+import { CLIENTS, CLIENT_ORDER, BUILTIN_CATEGORIES, KIND_LABEL, type CustomCategory, type CategoryId, type TabId, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
 
 type Toast = { kind: "ok" | "err" | "info"; text: string } | null;
 
@@ -73,6 +73,14 @@ interface MakeDownstreamDialog {
   busy: boolean;
   error: string;
   done: CreatedDownstream | null;
+}
+
+/** 自定义类别：新建 / 编辑 / 删除 */
+interface CategoriesDialog {
+  type: "categories";
+  items: { id: string; name: string; keywords: string }[];
+  busy: boolean;
+  error: string;
 }
 
 /** 站长：新建下游分组 */
@@ -203,12 +211,13 @@ function rememberCost(g: { site_id: string; id: string }, u: GroupUsage) {
   }
 }
 
+const TAB_KEY = "ferrydeck.category";
 const state = {
   view: "boot" as "boot" | "main",
   sites: [] as SiteView[],
   groups: [] as GroupView[],
   overview: [] as ClientOverview[],
-  selected: "claude" as TabId,
+  selected: loadTab(),
   siteFilter: "all",
   sort: loadSort(),
   sortCol: loadSortCol(),
@@ -222,7 +231,7 @@ const state = {
   toast: null as Toast,
   /** 右侧成本抽屉；`entered` 记录滑入动画是否已经播过（重绘不要重播） */
   drawer: null as null | { siteId: string; groupId: string; name: string; siteName: string; status: "loading" | "ready" | "error"; data?: GroupUsage; error?: string; entered: boolean },
-  dialog: null as AdminRemoveGroupDialog | SayHiDialog | MakeDownstreamDialog | AdminCreateGroupDialog | AdminAddUpstreamDialog | AdminConfirmDialog | GroupEditDialog | AddDialog | RemoveDialog | SpeedConfirmDialog | SpeedScopeDialog | UnclassifiedNotice | null,
+  dialog: null as CategoriesDialog | AdminRemoveGroupDialog | SayHiDialog | MakeDownstreamDialog | AdminCreateGroupDialog | AdminAddUpstreamDialog | AdminConfirmDialog | GroupEditDialog | AddDialog | RemoveDialog | SpeedConfirmDialog | SpeedScopeDialog | UnclassifiedNotice | null,
   /** 测速进度和“停止”标志 */
   testDone: 0,
   testTotal: 0,
@@ -236,6 +245,8 @@ const state = {
   /** 数据目录被清理软件等清空：以前添加过哪些站点（没有则 null） */
   dataLoss: null as DataLoss | null,
   version: "",
+  /** 用户自定义的模型类别 */
+  customCats: [] as CustomCategory[],
   update: null as UpdateInfo | null,
   updating: false,
   checking: false,
@@ -306,7 +317,24 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
 
 const isAuthError = (m: string) => m.includes("登录已过期") || m === "未登录";
 const gkey = (g: { site_id: string; id: string }) => `${g.site_id}\u0001${g.id}`;
-const ov = (c: TabId) => state.overview.find((o) => o.client === c);
+/** 上次选的类别 tab（没有就是“全部”）。 */
+function loadTab(): TabId {
+  try {
+    const v = localStorage.getItem(TAB_KEY);
+    return v && (v === "all" || v.length > 0) ? (v as TabId) : "all";
+  } catch {
+    return "all";
+  }
+}
+function pickTab(id: TabId) {
+  state.selected = id;
+  try {
+    localStorage.setItem(TAB_KEY, id);
+  } catch {
+    /* 记不住就算了 */
+  }
+}
+const ov = (c: ClientId) => state.overview.find((o) => o.client === c);
 const multiSite = () => state.sites.length > 1;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -334,10 +362,8 @@ async function handleError(e: unknown, prefix = "", site?: { name: string }) {
 // ---------- 数据 ----------
 
 function pickClient() {
-  if (!state.groups.some((g) => g.clients.includes(state.selected))) {
-    const first = CLIENT_ORDER.find((c) => state.groups.some((g) => g.clients.includes(c)));
-    if (first) state.selected = first;
-  }
+  // 选中的类别 tab 里已经没有分组了（站点移除、手动改了类别）：回到“全部”
+  if (state.selected !== "all" && !state.groups.some((g) => categoriesOf(g).includes(state.selected as CategoryId))) state.selected = "all";
   if (state.siteFilter !== "all" && !state.sites.some((s) => s.id === state.siteFilter)) state.siteFilter = "all";
 }
 
@@ -355,7 +381,7 @@ async function refreshAll(maxAgeSecs = 0, opts: { models?: boolean; forceCosts?:
   render();
   try {
     const [r, overview] = await Promise.all([backend.listGroups(maxAgeSecs), backend.overview()]);
-    state.groups = r.groups.map((g) => (g.other && !g.clients.includes("other") ? { ...g, clients: [...g.clients, "other" as TabId] } : g));
+    state.groups = r.groups;
     state.sites = r.sites;
     state.fetchedAt = r.fetched_at;
     state.overview = overview;
@@ -478,13 +504,13 @@ async function loadActiveModels() {
   }
 }
 
-async function enable(g: GroupView, model?: string | null) {
-  const client = state.selected;
-  if (client === "other" || state.busyGroup !== null || !g.clients.includes(client)) return;
+async function enable(g: GroupView, model?: string | null, client?: ClientId) {
+  const target = client ?? primaryClient(g);
+  if (state.busyGroup !== null || !clientsOf(g).includes(target)) return;
   state.busyGroup = gkey(g);
   render();
   try {
-    const out = await backend.enableGroup(g.site_id, g.id, client, model ?? null);
+    const out = await backend.enableGroup(g.site_id, g.id, target, model ?? null);
     state.models[gkey(g)] = out.models;
     await refreshOverview();
     const c = CLIENTS[out.client];
@@ -496,6 +522,15 @@ async function enable(g: GroupView, model?: string | null) {
     state.busyGroup = null;
     render();
   }
+}
+
+/** 点“启用”：只能配到一个客户端就直接配；Claude 类分组能配 Claude Code 和 Claude Desktop，弹出小菜单选一个。 */
+function enableClick(e: MouseEvent, g: GroupView) {
+  const used = activeOverviews(g).map((x) => x.client);
+  const cl = clientsOf(g).filter((c) => !used.includes(c));
+  if (cl.length <= 1) return void enable(g, null, cl[0]);
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  showCtxMenu(r.left, r.bottom + 4, cl.map((c) => ({ label: `配置到 ${CLIENTS[c].name}`, testid: `enable-pick-${c}`, run: () => void enable(g, null, c) })));
 }
 
 async function topup(site: SiteView) {
@@ -606,8 +641,6 @@ async function submitLogin() {
       // 新增站点：用提示条把进度说出来，用户不用对着空白等
       showToast("info", "开始刷新分组…");
       await refreshAll(0, { models: false, costs: false });
-      const first = CLIENT_ORDER.find((c) => state.groups.some((g) => g.site_id === site.id && g.clients.includes(c)));
-      if (first) state.selected = first;
       render();
       showToast("info", "开始刷新模型列表…");
       await loadAllModels();
@@ -902,24 +935,38 @@ function viewSiteProblems(): HTMLElement | null {
   );
 }
 
-/** 内容区顶部的客户端 tab（Claude Code / Claude Desktop / Codex / Gemini CLI），每个 tab 下面一行小字是正在使用的分组。 */
-function viewClientTabs(): HTMLElement {
+/** 当前类别 tab 和站点筛选下列出的分组。 */
+function listedGroups(): GroupView[] {
+  const t = state.selected;
+  return state.groups.filter((g) => (t === "all" || categoriesOf(g).includes(t)) && (state.siteFilter === "all" || g.site_id === state.siteFilter));
+}
+
+/** 内容区顶部的类别 tab：全部 + 有分组的模型类别（Claude / OpenAI / Gemini / DeepSeek / 视频 / 音频…）。 */
+function viewCategoryTabs(): HTMLElement {
+  const count = (c: CategoryId) => state.groups.filter((g) => categoriesOf(g).includes(c)).length;
+  const tab = (id: TabId, name: string, n: number, tip?: string) =>
+    el(
+      "button",
+      { class: `side-item${state.operator === null && state.selected === id ? " selected" : ""}`, "data-testid": `cat-${id}`, ...(tip ? { "data-tip": tip } : {}), onClick: () => { pickTab(id); state.operator = null; state.modelFilter = ""; render(true); } },
+      el("span", { class: "side-text" }, el("span", { class: "side-name" }, name), el("span", { class: "side-sub", "data-testid": `cat-count-${id}` }, `${n} 个分组`)),
+    );
+  return el("div", { class: "client-tabs", "data-testid": "client-tabs" }, tab("all", "全部", state.groups.length, "所有分组"), ...allCategories().filter((c) => count(c.id) > 0 || c.custom).map((c) => tab(c.id, c.name, count(c.id), c.tip)), el("button", { class: "side-item add-cat", "data-testid": "manage-categories", "data-tip": "新建 / 编辑自定义类别：自己起名字，设模型名关键词，匹配的分组自动归进来", onClick: () => openCategories() }, "＋ 类别"));
+}
+
+/** 四个客户端现在各自在用哪个分组（只是状态，不能点；切换分组在分组行上点“启用”）。 */
+function viewClientStatus(): HTMLElement {
   return el(
     "div",
-    { class: "client-tabs", "data-testid": "client-tabs" },
-    ...TAB_ORDER.filter((c) => c !== "other" || state.groups.some((g) => g.clients.includes("other"))).map((c) => {
-      const o = c === "other" ? undefined : ov(c);
-      const count = state.groups.filter((g) => g.clients.includes(c)).length;
+    { class: "client-status-row", "data-testid": "client-status-row" },
+    ...CLIENT_ORDER.map((c) => {
+      const o = ov(c);
       const a = o?.in_use ? o.active : null;
+      const text = a ? (multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name) : state.loading && state.groups.length === 0 ? "加载中…" : "未配置";
       return el(
-        "button",
-        { class: `side-item${state.operator === null && state.selected === c ? " selected" : ""}`, "data-testid": `client-${c}`, onClick: () => { state.selected = c; state.operator = null; state.modelFilter = ""; render(true); } },
-        el(
-          "span",
-          { class: "side-text" },
-          el("span", { class: "side-name" }, CLIENTS[c].name, o && o.conflicts.length > 0 ? el("span", { class: "warn-mark", title: "存在可能覆盖配置的设置" }, " ⚠") : null),
-          el("span", { class: "side-sub", ...(a ? { "data-tip": multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name } : {}), "data-testid": `client-status-${c}` }, a ? (multiSite() ? `${a.site_name} · ${a.group_name}` : a.group_name) : state.loading && state.groups.length === 0 ? "加载中…" : count === 0 ? "暂无可用分组" : ""),
-        ),
+        "span",
+        { class: `client-chip${a ? " on" : ""}`, "data-testid": `client-${c}`, "data-tip": `${CLIENTS[c].name}：${a ? text : "还没有配置分组"}${o && !o.dir_exists ? "（没有检测到配置目录，可能还没安装）" : ""}` },
+        el("span", { class: "chip-name" }, CLIENTS[c].name, o && o.conflicts.length > 0 ? el("span", { class: "warn-mark", title: "存在可能覆盖配置的设置" }, " ⚠") : null),
+        el("span", { class: "chip-sub", "data-testid": `client-status-${c}` }, text),
       );
     }),
   );
@@ -959,6 +1006,59 @@ function viewSidebar(): HTMLElement {
 function modelsOf(g: GroupView): string[] {
   return state.allModels[gkey(g)] ?? state.models[gkey(g)] ?? g.models ?? [];
 }
+
+/** 按模型名识别类别（小写匹配）。顺序无关：一个分组里有几类模型就属于几类。 */
+const CATEGORY_RULES: [CategoryId, RegExp][] = [
+  ["claude", /^claude|anthropic|^fable|^opus|^sonnet|^haiku/],
+  ["openai", /^gpt(?!.*image)|^o[134](-|$)|^chatgpt|^codex|^text-davinci/],
+  ["gemini", /^gemini(?!.*image)/],
+  ["deepseek", /deepseek/],
+  ["cn", /kimi|moonshot|^glm|zhipu|qwen|qwq|ernie|^doubao(?!.*seed(ance|ream))|hunyuan|minimax|^yi-|baichuan|^spark|^step-|^mimo|longcat/],
+  ["image", /image|dall-?e|^flux|midjourney|^mj|sdxl|stable-?diffusion|imagen|nano-?banana|seedream|^sd[0-9]/],
+  ["video", /video|^sora|^veo|kling|seedance|runway|^wan|hailuo|^pika|^vidu|cogvideo/],
+  ["audio", /tts|whisper|audio|speech|^suno|asr|transcribe|voice|^music/],
+  ["embed", /embed|rerank|^bge-/],
+];
+/** 全部类别（界面顺序）：内置的（不含“其他”）→ 自定义的 → 其他。 */
+const allCategories = (): { id: CategoryId; name: string; tip: string; custom?: boolean }[] => [
+  ...BUILTIN_CATEGORIES.filter((c) => c.id !== "other"),
+  ...state.customCats.map((c) => ({ id: c.id, name: c.name, tip: c.keywords.length ? `自定义类别：模型名或分组名里含 ${c.keywords.join("、")}` : "自定义类别（还没设置关键词，只能手动归类）", custom: true })),
+  ...BUILTIN_CATEGORIES.filter((c) => c.id === "other"),
+];
+const CATEGORY_ORDER_NOW = (): CategoryId[] => allCategories().map((c) => c.id);
+const categoryName = (id: CategoryId): string => allCategories().find((c) => c.id === id)?.name ?? "（已删除的类别）";
+const PLATFORM_CATEGORY: Record<string, CategoryId> = { anthropic: "claude", openai: "openai", gemini: "gemini" };
+
+/** 自动识别分组的类别：站点给的平台 + 模型名。识别不出就是“其他”。 */
+function inferCategories(g: GroupView): CategoryId[] {
+  const found = new Set<CategoryId>();
+  const p = PLATFORM_CATEGORY[g.platform];
+  if (p) found.add(p);
+  for (const m of modelsOf(g)) {
+    const l = m.toLowerCase();
+    for (const [c, re] of CATEGORY_RULES) if (re.test(l)) found.add(c);
+  }
+  // 自定义类别：模型名或分组名里含关键词就归进去
+  const hay = [g.name.toLowerCase(), ...modelsOf(g).map((m) => m.toLowerCase())];
+  for (const c of state.customCats) if (c.keywords.some((k) => k && hay.some((h) => h.includes(k)))) found.add(c.id);
+  return found.size ? CATEGORY_ORDER_NOW().filter((c) => found.has(c)) : ["other"];
+}
+/** 分组的类别：手动设置的优先，否则自动识别。 */
+const categoriesOf = (g: GroupView): CategoryId[] => (g.categories && g.categories.length ? g.categories : inferCategories(g));
+
+const CATEGORY_CLIENTS: Partial<Record<CategoryId, ClientId[]>> = { claude: ["claude", "claude_desktop"], openai: ["codex"], gemini: ["gemini"] };
+/**
+ * 这个分组能一键配置到哪些客户端。sub2api 和手动设置过类别的，以后端给的为准；
+ * new-api 没有平台分类，后端允许配到任何客户端：模型名认出了 Claude / OpenAI / Gemini 就收窄到对应的客户端，认不出就保持都能配（宁可多给，别让用户没法配）。
+ */
+function clientsOf(g: GroupView): ClientId[] {
+  if (!g.clients_inferred) return g.clients;
+  const hit = CLIENT_ORDER.filter((c) => inferCategories(g).some((cat) => CATEGORY_CLIENTS[cat]?.includes(c)));
+  return hit.length ? hit : g.clients;
+}
+const primaryClient = (g: GroupView): ClientId => clientsOf(g)[0] ?? "claude";
+/** 这个分组正在被哪些客户端使用。 */
+const activeOverviews = (g: GroupView) => state.overview.filter((o) => o.in_use && o.active && o.active.site_id === g.site_id && o.active.group_id === g.id);
 
 /**
  * 把测速失败的原因归成一个短标签放在时延列里，原文放在鼠标悬停提示里。
@@ -1025,10 +1125,9 @@ function startSpeed() {
   render();
 }
 
-/** 当前客户端、当前站点筛选下列出的分组。 */
+/** 当前类别、当前站点筛选下列出的分组。 */
 function speedTargets(): GroupView[] {
-  const c = state.selected;
-  return state.groups.filter((g) => g.clients.includes(c) && (state.siteFilter === "all" || g.site_id === state.siteFilter));
+  return listedGroups();
 }
 
 /**
@@ -1037,7 +1136,6 @@ function speedTargets(): GroupView[] {
  */
 async function runSpeedTest(list: GroupView[]) {
   if (state.testing) return;
-  const c = state.selected;
   if (list.length === 0) return;
   state.testing = true;
   state.testCancel = false;
@@ -1059,7 +1157,7 @@ async function runSpeedTest(list: GroupView[]) {
       state.probing.add(k);
       render();
       try {
-        const r = await backend.probeGroup(g.site_id, g.id, null, realClient(c));
+        const r = await backend.probeGroup(g.site_id, g.id, null, primaryClient(g));
         state.speeds[k] = { first: r.first_ms, total: r.total_ms, model: r.model, input: r.input_tokens ?? null };
         if (r.models.length > 0) state.allModels[k] = r.models;
       } catch (e) {
@@ -1125,12 +1223,9 @@ function moreMenu(g: GroupView, tid: string): HTMLElement {
   );
 }
 
-/** sayhi 要按某个客户端的协议发；“其他”类的分组没有对应客户端，按 Claude Code 的协议试。 */
-const realClient = (c: TabId | undefined): ClientId => (c && c !== "other" ? c : "claude");
-
 function openSayHi(g: GroupView) {
   const models = modelsOf(g).filter((m) => !/image|embed|tts|whisper|rerank/.test(m));
-  state.dialog = { type: "sayhi", g, models, model: models[0] ?? "", client: realClient(g.clients.includes(state.selected) ? state.selected : g.clients[0]), busy: false, error: "", results: [] };
+  state.dialog = { type: "sayhi", g, models, model: models[0] ?? "", client: primaryClient(g), busy: false, error: "", results: [] };
   render();
 }
 
@@ -1150,15 +1245,16 @@ async function runSayHi(d: SayHiDialog) {
 }
 
 /**
- * 分组行里的“客户端”列：药丸显示这个分组配置到哪些客户端，点开是多选下拉，勾选完点别处 / 按 Esc 关闭时保存（有改动才保存）。
- * 站点没给分组分类的（`clients_inferred`）显示“未设置”，下拉里默认全不选，由用户自己选；全部取消 = 恢复站点给的默认分类。
+ * 分组行里的“类别”列：药丸显示这个分组属于哪些模型类别（手动设置的优先，否则按平台和模型名自动识别），
+ * 点开是多选下拉，勾选完点别处 / 按 Esc 关闭时保存（有改动才保存）。全部取消 = 恢复自动识别。
  */
 function clientsCell(g: GroupView, tid: string): HTMLElement {
-  const chosen = g.clients_inferred ? [] : g.clients;
-  const names = chosen.map((c) => CLIENTS[c].name);
-  const text = g.clients_inferred ? "未设置" : names.length === CLIENT_ORDER.length && !chosen.includes("other") ? "全部客户端" : names.length <= 1 ? (names[0] ?? "未设置") : `${names[0]} +${names.length - 1}`;
-  const tip = g.clients_inferred ? "这个站点没有给分组分类：点击选择它可以配置到哪些客户端（可多选）" : `可以配置到：${names.join("、")}。点击修改（可多选）`;
-  return el("button", { class: `clients-pill${g.clients_inferred ? " unset" : ""}`, "data-tip": tip, "data-testid": `clients-${tid}`, onClick: (e: Event) => openClientsPicker(e.currentTarget as HTMLElement, g) }, el("span", { class: "clients-text" }, text), el("span", { class: "caret", "aria-hidden": "true" }, "▾"));
+  const cats = categoriesOf(g);
+  const names = cats.map((c) => categoryName(c));
+  const manual = !!(g.categories && g.categories.length);
+  const text = names.length <= 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+  const tip = `${names.join("、")}（${manual ? "你手动设置的" : "按平台和模型名自动识别的"}）。点击修改类别（可多选）`;
+  return el("button", { class: `clients-pill${manual ? "" : " auto"}`, "data-tip": tip, "data-testid": `clients-${tid}`, onClick: (e: Event) => openClientsPicker(e.currentTarget as HTMLElement, g) }, el("span", { class: "clients-text" }, text), el("span", { class: "caret", "aria-hidden": "true" }, "▾"));
 }
 
 let clientsPickerClose: (() => void) | null = null;
@@ -1167,12 +1263,13 @@ function closeClientsPicker() {
 }
 function openClientsPicker(anchor: HTMLElement, g: GroupView) {
   closeClientsPicker();
-  const initial: TabId[] = g.clients_inferred ? [] : [...g.clients];
-  const selected = new Set<TabId>(initial);
+  const initial: CategoryId[] = [...categoriesOf(g)];
+  const selected = new Set<CategoryId>(initial);
   const m = document.createElement("div");
   m.className = "clients-picker";
   m.setAttribute("data-testid", "clients-picker");
-  for (const c of TAB_ORDER) {
+  for (const cat of allCategories()) {
+    const c = cat.id;
     const label = document.createElement("label");
     label.className = "check-row";
     const box = document.createElement("input");
@@ -1180,13 +1277,24 @@ function openClientsPicker(anchor: HTMLElement, g: GroupView) {
     box.checked = selected.has(c);
     box.setAttribute("data-testid", `ec-${c}`);
     box.addEventListener("change", () => (box.checked ? selected.add(c) : selected.delete(c)));
-    label.append(box, document.createTextNode(CLIENTS[c].name));
+    label.append(box, document.createTextNode(cat.name));
+    label.title = cat.tip;
     m.append(label);
   }
   const hint = document.createElement("div");
   hint.className = "muted small";
-  hint.textContent = "只影响它出现在哪些客户端下、能不能一键配置；站点上的分组不变。全部取消 = 用站点给的默认分类。";
+  hint.textContent = "类别决定它出现在哪个 tab，Claude / OpenAI / Gemini 类的还能一键配置到对应客户端；站点上的分组不变。全部取消 = 恢复自动识别。";
   m.append(hint);
+  const manage = document.createElement("button");
+  manage.type = "button";
+  manage.className = "link small";
+  manage.setAttribute("data-testid", "picker-manage-categories");
+  manage.textContent = "＋ 新建 / 管理自定义类别…";
+  manage.addEventListener("click", () => {
+    closeClientsPicker();
+    openCategories();
+  });
+  m.append(manage);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - m.offsetWidth - 4))}px`;
@@ -1200,19 +1308,46 @@ function openClientsPicker(anchor: HTMLElement, g: GroupView) {
     document.removeEventListener("keydown", onKey, true);
     m.remove();
     clientsPickerClose = null;
-    const now = TAB_ORDER.filter((c) => selected.has(c));
+    const now = CATEGORY_ORDER_NOW().filter((c) => selected.has(c));
+    // 没改动不保存；改成和自动识别的结果一样、且本来就没手动设置过，也不保存
+    const sameAsAuto = !(g.categories && g.categories.length) && now.length === initial.length && now.every((c) => initial.includes(c));
+    if (sameAsAuto) return;
     const changed = now.length !== initial.length || now.some((c) => !initial.includes(c));
     if (changed) void saveClients(g, now);
   };
 }
 
-async function saveClients(g: GroupView, clients: TabId[]) {
+async function saveClients(g: GroupView, clients: CategoryId[]) {
   try {
     await backend.setGroupClients(g.site_id, g.id, clients);
-    showToast("ok", clients.length ? `已把「${g.name}」设为支持：${clients.map((c) => CLIENTS[c].name).join("、")}` : `「${g.name}」已恢复成站点给的默认分类`);
+    showToast("ok", clients.length ? `已把「${g.name}」归为：${clients.map((c) => categoryName(c)).join("、")}` : `「${g.name}」已恢复自动识别类别`);
     await refreshAll(300, { models: false, costs: false });
   } catch (e) {
     showToast("err", `修改失败：${errText(e)}`);
+  }
+}
+
+function openCategories() {
+  state.dialog = { type: "categories", items: state.customCats.map((c) => ({ id: c.id, name: c.name, keywords: c.keywords.join("，") })), busy: false, error: "" };
+  render();
+}
+
+async function saveCategories(d: CategoriesDialog) {
+  d.busy = true;
+  d.error = "";
+  render();
+  try {
+    const list = d.items.filter((x) => x.name.trim() || x.keywords.trim()).map((x) => ({ id: x.id, name: x.name, keywords: x.keywords.split(/[,，、\s]+/).filter(Boolean) }));
+    state.customCats = await backend.saveCustomCategories(list);
+    state.dialog = null;
+    // 删掉的类别：正在看它的 tab 回到“全部”；分组的手动类别里它也被后端去掉了，重新读一遍
+    if (state.selected !== "all" && !allCategories().some((c) => c.id === state.selected)) pickTab("all");
+    showToast("ok", state.customCats.length ? `已保存 ${state.customCats.length} 个自定义类别` : "已清空自定义类别");
+    await refreshAll(300, { models: false, costs: false });
+  } catch (e) {
+    d.busy = false;
+    d.error = errText(e);
+    render();
   }
 }
 
@@ -1266,28 +1401,36 @@ async function submitMakeDownstream(d: MakeDownstreamDialog) {
   }
 }
 
-function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
+function groupCard(g: GroupView): HTMLElement {
   const k = gkey(g);
-  const a = o?.in_use ? o.active : null;
-  const isActive = !!a && a.site_id === g.site_id && a.group_id === g.id;
+  const actives = activeOverviews(g);
+  const a = actives[0]?.active ?? null;
+  const cl = clientsOf(g);
+  // 正在被它的全部可配置客户端使用才算“使用中”；只被一部分客户端使用时，还可以配到剩下的客户端
+  const free = cl.filter((c) => !actives.some((x) => x.client === c));
+  const isActive = actives.length > 0 && free.length === 0;
+  const partial = actives.length > 0 && free.length > 0;
   const busy = state.busyGroup === k;
   const models = state.models[k] ?? [];
   const current = a?.model ?? null;
   const tid = `${g.site_id}-${g.id}`;
   const sp = state.speeds[k];
   // 操作列：使用中只显示文案，否则是启用按钮
-  const control = state.selected === "other"
-    ? el("span", { class: "muted small", "data-tip": "这个分组归在“其他”：它的用途不在 Claude Code / Claude Desktop / Codex / Gemini CLI 里，只能归类查看，不能一键配置。要配置的话，到“客户端”列里勾选对应的客户端", "data-testid": `noconfig-${tid}` }, "不可配置")
+  const control = cl.length === 0
+    ? el("span", { class: "muted small", "data-tip": "这个分组的模型类别（视频、音频、DeepSeek 等）没有对应的一键配置客户端，只能查看倍率、成本、延迟，和用 sayhi 测试。要配置的话，到“类别”列里勾选 Claude / OpenAI / Gemini", "data-testid": `noconfig-${tid}` }, "不可配置")
     : isActive
-    ? el("span", { class: "badge" }, "使用中")
-    : el("button", { class: `enable-btn${busy ? " busy" : ""}`, "aria-label": "启用", title: "启用", "data-testid": `enable-${tid}`, disabled: state.busyGroup !== null, onClick: () => void enable(g) }, ...(busy ? [octopusWorking(), "配置中…"] : [powerIcon()]));
+    ? el("span", { class: "badge", "data-tip": `正在被 ${actives.map((x) => CLIENTS[x.client].name).join("、")} 使用`, "data-testid": `inuse-${tid}` }, "使用中")
+    : partial
+    ? el("button", { class: `badge partial${busy ? " busy" : ""}`, "data-tip": `正在被 ${actives.map((x) => CLIENTS[x.client].name).join("、")} 使用；点击还可以配置到 ${free.map((c) => CLIENTS[c].name).join("、")}`, "data-testid": `enable-${tid}`, "aria-label": "启用", disabled: state.busyGroup !== null, onClick: (e: Event) => enableClick(e as MouseEvent, g) }, busy ? "配置中…" : "使用中 ▾")
+    : el("button", { class: `enable-btn${busy ? " busy" : ""}`, "aria-label": "启用", title: "启用", "data-testid": `enable-${tid}`, disabled: state.busyGroup !== null, onClick: (e: Event) => enableClick(e as MouseEvent, g) }, ...(busy ? [octopusWorking(), "配置中…"] : [powerIcon()]));
   // 站点用量记录里的真实首字时延（中位数）比本地测速更准，有就用它，没有才显示本地测速的结果
   const real = state.costs[k];
   const realFrt = real?.frt ?? null;
   const speedText = realFrt !== null ? `${(realFrt / 1000).toFixed(2)}s` : !sp ? null : "error" in sp ? failLabel(sp.error) : `${(sp.first / 1000).toFixed(2)}s`;
   // 模型列（第 6 项）：使用中的分组可直接切换模型；其他分组下拉查看该分组的模型
-  const modelList = isActive && models.length > 0 ? models : modelsOf(g);
-  const modelCell = isActive
+  const inUse = actives.length > 0; // 被任何客户端使用：模型列可直接切换模型
+  const modelList = inUse && models.length > 0 ? models : modelsOf(g);
+  const modelCell = inUse
     ? el(
         "select",
         {
@@ -1295,7 +1438,7 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
           "data-testid": `model-select-${tid}`,
           disabled: state.busyGroup !== null,
           title: "切换模型",
-          onChange: (e: Event) => { const t = e.target as HTMLSelectElement; t.blur(); void enable(g, t.value); },
+          onChange: (e: Event) => { const t = e.target as HTMLSelectElement; t.blur(); void enable(g, t.value, actives[0]?.client); },
         },
         ...(modelList.length > 0 ? modelList : current ? [current] : []).map((m) => el("option", { value: m, selected: m === current }, m)),
       )
@@ -1306,12 +1449,11 @@ function groupCard(g: GroupView, o: ClientOverview | undefined): HTMLElement {
         : el("span", { class: "muted small", "data-testid": `row-models-${tid}`, "data-tip": "还没有读到这个分组的模型：站点有“模型广场”时刷新就能读到；没有的话，需要这个分组建过专用 Key（启用或测速一次）后才能读取" }, "未获取");
   return el(
     "div",
-    { class: `card${isActive ? " active" : ""}`, "data-testid": `group-card-${tid}` },
+    { class: `card${inUse ? " active" : ""}`, "data-testid": `group-card-${tid}` },
     el(
       "div",
       { class: "card-main" },
       el("h3", g.description ? { "data-tip": g.description, "data-testid": `name-${tid}` } : { "data-testid": `name-${tid}` }, g.name, multiSite() ? el("span", { class: "site-tag", "data-testid": `site-tag-${tid}` }, g.site_name) : null),
-      g.clients_inferred && el("span", { class: "unclassified", "data-testid": `unclassified-${tid}` }, "该站点未对分组分类"),
       ...((state.downstreamRefs[k] ?? []).length ? [el("div", { class: "downstream-lines", "data-testid": `downs-${tid}` }, ...state.downstreamRefs[k].map((r) => el("span", { class: "down-chip", "data-tip": `下游分组：${r.site_name} 里的「${r.group_name}」，倍率 ×${r.rate}`, "data-testid": `down-ref-${tid}-${r.group_id}` }, "↳ ", el("span", { class: "chip-site" }, r.site_name), " · ", r.group_name, " ", el("span", { class: "chip-rate" }, `×${r.rate}`))))] : []),
     ),
     el("div", { class: "cell-clients" }, clientsCell(g, tid)),
@@ -2632,7 +2774,7 @@ function viewListHead(available: string[]): HTMLElement {
     "div",
     { class: "card list-head", "data-testid": "list-head" },
     el("div", { class: "card-main" }, siteCell),
-    el("div", { class: "cell-clients" }, el("span", { class: "col-head" }, "客户端")),
+    el("div", { class: "cell-clients" }, el("span", { class: "col-head", "data-tip": "分组的模型类别（Claude / OpenAI / Gemini / DeepSeek / 视频 / 音频…）：自动识别，也可以点每行的类别手动改，或自定义类别" }, "类别")),
     // 测速按钮放在“首字时延”标题的左边：测速测的就是这一列
     el(
       "div",
@@ -2650,10 +2792,8 @@ function viewListHead(available: string[]): HTMLElement {
 function viewMain(): HTMLElement {
   if (state.operator && !state.sites.some((x) => x.id === state.operator && x.is_admin)) state.operator = null; // 站点被移除或不再是管理员
   if (state.operator) return el("div", { class: "main-wrap" }, viewSidebar(), el("section", { class: "content" }, viewOperator(state.operator)));
-  const c = state.selected;
-  const o = ov(c);
-  // 当前列出的分组（客户端 + 站点筛选）；模型下拉的候选项只取这些分组的模型，去重，不出现无关的模型
-  const listed = state.groups.filter((g) => g.clients.includes(c) && (state.siteFilter === "all" || g.site_id === state.siteFilter));
+  // 当前列出的分组（类别 + 站点筛选）；模型下拉的候选项只取这些分组的模型，去重，不出现无关的模型
+  const listed = listedGroups();
   const availableModels = [...new Set(listed.flatMap(modelsOf))].sort();
   // 选中的模型已经不在候选项里（比如换了站点筛选）：筛选条件一并清掉，不能让下拉框显示空白、列表却还在被看不见的条件过滤
   if (state.modelFilter && !availableModels.includes(state.modelFilter)) state.modelFilter = "";
@@ -2730,8 +2870,8 @@ function viewMain(): HTMLElement {
     const pendingSite = state.siteFilter !== "all" && state.sites.some((x) => x.id === state.siteFilter && !x.connected && !x.needs_login);
     const empty = state.loading || pendingSite
       ? el("div", { class: "panel muted", "data-testid": "loading" }, "正在加载分组…")
-      : el("div", { class: "panel", "data-testid": "empty-client" }, state.modelFilter ? `没有提供 ${state.modelFilter} 的分组。` : state.siteFilter === "all" ? `没有可用于 ${CLIENTS[c].name} 的分组。` : `这个站点没有可用于 ${CLIENTS[c].name} 的分组。`);
-    body.push(el("div", { class: "list", "data-testid": "group-list" }, viewListHead(availableModels), ...(groups.length ? groups.map((g) => groupCard(g, o)) : [empty])));
+      : el("div", { class: "panel", "data-testid": "empty-client" }, state.modelFilter ? `没有提供 ${state.modelFilter} 的分组。` : state.selected === "all" ? (state.siteFilter === "all" ? "没有可用的分组。" : "这个站点没有可用的分组。") : `没有${categoryName(state.selected)}类的分组。`);
+    body.push(el("div", { class: "list", "data-testid": "group-list" }, viewListHead(availableModels), ...(groups.length ? groups.map((g) => groupCard(g)) : [empty])));
   }
 
   return el(
@@ -2741,18 +2881,19 @@ function viewMain(): HTMLElement {
     el(
       "section",
       { class: "content" },
-      o && o.conflicts.length > 0 &&
+      ...state.overview.filter((o) => o.conflicts.length > 0).map((o) =>
         el(
           "div",
-          { class: "banner warn", "data-testid": "conflict-banner" },
+          { class: "banner warn", "data-testid": `conflict-banner${o.client === "claude" ? "" : "-" + o.client}` },
           // Claude Desktop 的问题是“还没进入第三方模式”，不是终端里有覆盖配置，文案要分开
-          el("strong", {}, c === "claude_desktop" ? "Claude Desktop 需要先完成设置，配置才会生效：" : "检测到下列设置可能会覆盖配置，导致不生效："),
+          el("strong", {}, o.client === "claude_desktop" ? "Claude Desktop 需要先完成设置，配置才会生效：" : `${CLIENTS[o.client].name}：检测到下列设置可能会覆盖配置，导致不生效：`),
           el("ul", {}, ...o.conflicts.map((x) => el("li", {}, x))),
-          c !== "claude_desktop" && el("span", { class: "small" }, "请删除或注释掉这些设置，然后重新打开终端。"),
+          o.client !== "claude_desktop" && el("span", { class: "small" }, "请删除或注释掉这些设置，然后重新打开终端。"),
         ),
-      viewClientTabs(),
+      ),
+      viewClientStatus(),
+      viewCategoryTabs(),
       viewSiteProblems(),
-      o && !o.dir_exists && el("div", { class: "banner info", "data-testid": "nodir-banner" }, `没有检测到 ${CLIENTS[c].name} 的配置目录，可能还没安装；仍可先写入，安装后即可使用。`),
       ...body,
       el("p", { class: "footnote muted small" }, "写入前会自动备份你原来的配置。"),
     ),
@@ -2779,6 +2920,39 @@ function viewDialog(): HTMLElement | null {
     state.dialog = null;
     render();
   };
+  if (d.type === "categories") {
+    const close = () => {
+      if (d.busy) return;
+      state.dialog = null;
+      render();
+    };
+    return el(
+      "div",
+      { class: "modal-mask", "data-testid": "categories-dialog" },
+      el(
+        "form",
+        { class: "modal wide", role: "dialog", onSubmit: (ev: Event) => { ev.preventDefault(); if (!d.busy) void saveCategories(d); } },
+        el("h3", {}, "自定义模型类别"),
+        el("p", { class: "muted small" }, "自己起一个类别名，再写几个模型名关键词（用逗号分隔）：分组里的模型名或分组名只要含其中任何一个，就会自动归进这一类。也可以不写关键词，只在分组的「类别」列里手动勾选。关键词不区分大小写，例如：seedance，veo。"),
+        el(
+          "div",
+          { class: "cat-rows", "data-testid": "cat-rows" },
+          ...d.items.map((x, i) =>
+            el(
+              "div",
+              { class: "cat-row" },
+              el("input", { type: "text", placeholder: "类别名称（最多 12 个字）", value: x.name, maxlength: "12", disabled: d.busy, "data-testid": `cc-name-${i}`, onInput: (e: Event) => (x.name = (e.target as HTMLInputElement).value) }),
+              el("input", { type: "text", placeholder: "模型名关键词，逗号分隔", value: x.keywords, disabled: d.busy, "data-testid": `cc-keywords-${i}`, onInput: (e: Event) => (x.keywords = (e.target as HTMLInputElement).value) }),
+              el("button", { type: "button", class: "act-btn danger", "aria-label": "删除类别", "data-tip": "删除这个类别（分组不会被删，只是不再归在这一类）", "data-testid": `cc-remove-${i}`, disabled: d.busy, onClick: () => { d.items.splice(i, 1); render(true); } }, trashIcon()),
+            ),
+          ),
+        ),
+        el("button", { type: "button", class: "ghost small-btn", "data-testid": "cc-add", disabled: d.busy || d.items.length >= 20, onClick: () => { d.items.push({ id: "", name: "", keywords: "" }); render(true); } }, "＋ 添加一个类别"),
+        el("div", { class: "error", role: "alert", "data-testid": "cc-error" }, d.error),
+        el("div", { class: "modal-actions" }, el("button", { type: "button", class: "ghost", "data-testid": "cc-cancel", disabled: d.busy, onClick: close }, "取消"), el("button", { type: "submit", class: "primary", "data-testid": "cc-save", disabled: d.busy }, d.busy ? "保存中…" : "保存")),
+      ),
+    );
+  }
   if (isMenuDialog(d)) return viewMenuDialog(d);
   if (isAdminDialog(d)) return viewAdminDialog(d);
   if (d.type === "unclassified") {
@@ -2792,11 +2966,11 @@ function viewDialog(): HTMLElement | null {
         el(
           "div",
           { class: "muted", style: "display:flex;flex-direction:column;gap:8px" },
-          el("p", {}, `「${d.siteName}」没有给分组标注适用的客户端（Claude、Codex、Gemini），Ferrydeck 没法判断每个分组该配给谁。这会影响使用体验：`),
+          el("p", {}, `「${d.siteName}」没有给分组标注适用的平台，Ferrydeck 只能按分组里的模型名自动识别它属于 Claude / OpenAI / Gemini / DeepSeek / 视频 / 音频等哪一类。这会影响使用体验：`),
           el(
             "ul",
             { style: "margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px" },
-            el("li", {}, "这个站点的全部分组会在每一种客户端下都列出来，列表比较长，其中不少并不适用于当前客户端；"),
+            el("li", {}, "要先刷新读到各分组的模型（有“模型广场”的站点刷新就能读到，没有的需要启用或测速一次），识别之前分组会归在“其他”；识别不准的，可以在“类别”列里手动改。"),
           ),
         ),
         el("div", { class: "modal-actions" }, el("button", { class: "primary", "data-testid": "unclassified-ok", autofocus: true, onClick: close }, "确定")),
@@ -3070,6 +3244,7 @@ async function boot() {
   // 没有站点时，看看是不是数据被清理软件误删了（以前有、现在没了）
   if (state.sites.length === 0) state.dataLoss = await backend.dataLoss().catch(() => null);
   state.view = "main";
+  state.customCats = await backend.getCustomCategories().catch(() => []); // 用户自定义的模型类别要在第一次分类前读到
   void checkForUpdate(true);
   await refreshAll();
 }

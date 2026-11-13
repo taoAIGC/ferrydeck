@@ -24,10 +24,12 @@ after(async () => {
 });
 
 /** 打开一个干净页面，并收集页面错误/控制台错误。 */
-async function open(scenario = "", viewport = { width: 1100, height: 680 }, { speedConfirmed = true } = {}) {
+async function open(scenario = "", viewport = { width: 1100, height: 680 }, { speedConfirmed = true, tab = "claude" } = {}) {
   const ctx = await browser.newContext({ viewport });
   // 第一次测速前会弹说明框；多数测试不关心它，预先标记为已确认
   if (speedConfirmed) await ctx.addInitScript(() => localStorage.setItem("ferrydeck.speedConfirmed", "1"));
+  // 默认选中“Claude”类别 tab（应用会记住上次选的 tab）；传 tab: null 就是第一次使用的状态（“全部”）
+  if (tab) await ctx.addInitScript((v) => localStorage.setItem("ferrydeck.category", v), tab);
   const page = await ctx.newPage();
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(String(e)));
@@ -50,6 +52,12 @@ const linkVia = async (page, upId, { site, group } = {}) => {
   await T(page, "add-upstream-result").waitFor();
   await T(page, "au-done").click();
   await T(page, "add-upstream-dialog").waitFor({ state: "detached" });
+};
+/** 点分组行的“启用”：Claude 类分组能配到 Claude Code 和 Claude Desktop，会弹出小菜单，选一个（默认 Claude Code）；只有一个客户端时直接配置。 */
+const enableG = async (page, id, client = "claude") => {
+  await T(page, id).click();
+  const pick = T(page, `enable-pick-${client}`);
+  if ((await page.getByTestId("ctx-menu").count()) > 0) await pick.click();
 };
 const selectedClient = (page) => page.evaluate(() => document.querySelector(".side-item.selected")?.getAttribute("data-testid"));
 const count = (page, sel) => page.locator(sel).count();
@@ -80,7 +88,7 @@ test("首次启动没有站点：显示欢迎页和添加入口，客户端显�
   assert.match(await T(p, "empty-sites").textContent(), /还没有添加站点/);
   assert.match(await T(p, "empty-sites").textContent(), /new-api 和 sub2api/);
   assert.equal(await count(p, '[data-testid^="site-"][data-testid$="-x"]'), 0);
-  assert.equal(await T(p, "client-status-claude").textContent(), "暂无可用分组");
+  assert.equal(await T(p, "client-status-claude").textContent(), "未配置");
   assert.equal(await cards(p), 0);
   await p.screenshot({ path: "ui-tests/shots/welcome.png" });
   await done(p);
@@ -151,8 +159,8 @@ test("登录失败：显示中文错误，对话框保留，账号保留、密�
   await done(p);
 });
 
-test("添加成功：对话框关闭、站点卡和余额出现、分组列表显示、自动切到有分组的客户端", async () => {
-  const p = await open();
+test("添加成功：对话框关闭、站点卡和余额出现、分组列表显示，默认是“全部”tab", async () => {
+  const p = await open("", undefined, { tab: null });
   await addSite(p, "alpha.example.com", { name: "我的 Alpha" });
   await T(p, "group-card-alpha-2").waitFor();
   assert.equal(await count(p, '[data-testid="add-dialog"]'), 0);
@@ -160,7 +168,9 @@ test("添加成功：对话框关闭、站点卡和余额出现、分组列表�
   assert.match(await T(p, "site-alpha").textContent(), /我的 Alpha/);
   assert.doesNotMatch(await T(p, "site-alpha").textContent(), /sub2api|new-api/, "不再显示站点类型（第 4 项）");
   assert.equal(await T(p, "site-balance-alpha").textContent(), "$99.78", "余额前不再有“余额”二字（第 6 项）");
-  assert.equal(await selectedClient(p), "client-claude");
+  assert.equal(await selectedClient(p), "cat-all", "默认是“全部”tab");
+  assert.equal(await cards(p), 6, "Alpha 的 6 个分组都列出来");
+  await T(p, "cat-claude").click();
   assert.equal(await cards(p), 3, "Claude 类分组 3 个");
   assert.equal(await count(p, '[data-testid="unsupported"]'), 0, "不展示不支持的分组");
   assert.equal(await count(p, '[data-testid="site-tab-all"]'), 0, "只有一个站点时不显示“全部站点”");
@@ -191,7 +201,11 @@ test("对话框里按回车可以提交；重复添加同一站点视为重新�
 test("两个站点：分组合并显示，同名分组并存并带站点标签，出现站点筛选", async () => {
   const p = await open("sites2");
   await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await cards(p), 4, "Alpha 3 个 + Beta 1 个 Claude 分组");
+  await T(p, "cat-claude").click();
+  assert.equal(await cards(p), 4, "Alpha 3 个 + Beta 1 个 Claude 类分组");
+  await T(p, "cat-all").click();
+  assert.equal(await cards(p), 8, "全部：Alpha 6 个 + Beta 2 个");
+  await T(p, "cat-claude").click();
   assert.equal(await T(p, "site-tag-alpha-4").textContent(), "Alpha");
   assert.equal(await T(p, "site-tag-beta-Claude 逆向Kiro").textContent(), "Beta");
   assert.match(await T(p, "group-card-alpha-4").textContent(), /Claude 逆向Kiro/);
@@ -207,28 +221,31 @@ test("站点筛选：只看某个站点，再切回全部；筛选后该站点�
   const p = await open("sites2");
   await T(p, "group-card-alpha-2").waitFor();
   await T(p, "site-name-beta").click();
+  await T(p, "cat-all").click();
+  assert.equal(await cards(p), 2, "“全部”里 Beta 有两个分组");
+  await T(p, "cat-claude").click();
   assert.equal(await cards(p), 1);
   assert.equal(await count(p, '[data-testid="group-card-beta-Claude 逆向Kiro"]'), 1);
-  await T(p, "client-gemini").click();
-  assert.match(await T(p, "empty-client").textContent(), /这个站点没有可用于 Gemini CLI 的分组/);
+  await T(p, "cat-gemini").click();
+  assert.match(await T(p, "empty-client").textContent(), /没有Gemini类的分组/);
   await p.mouse.move(0, 0);
   await T(p, "site-tab-all").click();
   assert.equal(await cards(p), 1, "Gemini 只有 Alpha 的一个分组");
-  await T(p, "client-codex").click();
+  await T(p, "cat-openai").click();
   assert.equal(await cards(p), 2, "Codex：Alpha 的 GPT 福利 + Beta 的 GPT Pro");
   await done(p);
 });
 
 test("跨站点切换：同名分组互不混淆，启用另一个站点的分组后旧卡恢复", async () => {
   const p = await open("sites2");
-  await T(p, "enable-alpha-4").click();
+  await enableG(p, "enable-alpha-4");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-alpha-4"]')?.textContent.includes("使用中"));
   const toast = await T(p, "toast").textContent();
   assert.match(toast, /已把「Claude 逆向Kiro」（Alpha）配置到 Claude Code/);
   assert.equal(await T(p, "client-status-claude").textContent(), "Alpha · Claude 逆向Kiro", "多站点时状态里带站点名");
   assert.equal(await T(p, "enable-beta-Claude 逆向Kiro").getAttribute("aria-label"), "启用", "Beta 的同名分组不应被当成使用中");
 
-  await T(p, "enable-beta-Claude 逆向Kiro").click();
+  await enableG(p, "enable-beta-Claude 逆向Kiro");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-beta-Claude 逆向Kiro"]')?.textContent.includes("使用中"));
   assert.equal(await T(p, "enable-alpha-4").getAttribute("aria-label"), "启用", "Alpha 的卡片恢复可启用");
   assert.equal(await p.locator("text=使用中").count(), 1, "同一客户端同时只有一个使用中");
@@ -236,24 +253,29 @@ test("跨站点切换：同名分组互不混淆，启用另一个站点的分�
   await done(p);
 });
 
-test("同一个分组配到 Claude Code 和 Claude Desktop 互不影响", async () => {
+test("同一个分组配到 Claude Code 和 Claude Desktop 互不影响：配了一个，还能配另一个", async () => {
   const p = await open("sites1");
+  await T(p, "cat-claude").click();
   await T(p, "enable-alpha-12").click();
+  assert.equal(await count(p, '[data-testid="enable-pick-claude"]'), 1, "Claude 类分组：弹出小菜单选客户端");
+  assert.equal(await count(p, '[data-testid="enable-pick-claude_desktop"]'), 1);
+  await T(p, "enable-pick-claude").click();
   await p.waitForFunction(() => document.querySelector('[data-testid="client-status-claude"]')?.textContent === "Claude 逆向Kiro - 特价");
-  assert.equal(await T(p, "client-status-claude_desktop").textContent(), "");
-  await T(p, "client-claude_desktop").click();
-  assert.equal(await selectedClient(p), "client-claude_desktop");
-  assert.equal(await T(p, "enable-alpha-12").getAttribute("aria-label"), "启用");
-  await T(p, "enable-alpha-2").click();
-  await p.waitForFunction(() => document.querySelector('[data-testid="client-status-claude_desktop"]')?.textContent === "Claude 官方系列高速");
+  assert.equal(await T(p, "client-status-claude_desktop").textContent(), "未配置");
+  // 只被 Claude Code 使用：行上是“使用中 ▾”，还能配到 Claude Desktop；菜单里不再列 Claude Code
+  assert.match(await T(p, "enable-alpha-12").textContent(), /使用中/);
+  await T(p, "enable-alpha-12").click(); // 只剩 Claude Desktop 没配：直接配置，不再弹菜单
+  await p.waitForFunction(() => document.querySelector('[data-testid="client-status-claude_desktop"]')?.textContent === "Claude 逆向Kiro - 特价");
   assert.match(await T(p, "toast").textContent(), /完全退出（⌘Q）并重新打开 Claude Desktop/);
   assert.equal(await T(p, "client-status-claude").textContent(), "Claude 逆向Kiro - 特价");
+  assert.equal(await count(p, '[data-testid="enable-alpha-12"]'), 0, "两个客户端都在用：只剩“使用中”");
+  assert.equal(await count(p, '[data-testid="inuse-alpha-12"]'), 1);
   await done(p);
 });
 
 test("启用与模型切换：专用 Key 只在第一次创建；下拉框切换模型", async () => {
   const p = await open("sites1");
-  await T(p, "enable-alpha-4").click();
+  await enableG(p, "enable-alpha-4");
   await waitText(p, "toast", /专用 Key/);
   await T(p, "model-select-alpha-4").waitFor();
   await p.waitForFunction(() => document.querySelector('[data-testid="model-select-alpha-4"]').options.length > 1);
@@ -268,7 +290,7 @@ test("启用与模型切换：专用 Key 只在第一次创建；下拉框切换
 test("启用过程中：按钮显示“配置中…”，其他启用按钮被禁用，防止并发", async () => {
   const p = await open("sites1,slow");
   await T(p, "enable-alpha-2").waitFor();
-  await T(p, "enable-alpha-2").click();
+  await enableG(p, "enable-alpha-2");
   assert.equal(await T(p, "enable-alpha-2").textContent(), "配置中…");
   assert.equal(await T(p, "enable-alpha-4").isDisabled(), true);
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-alpha-2"]')?.textContent.includes("使用中"));
@@ -277,18 +299,18 @@ test("启用过程中：按钮显示“配置中…”，其他启用按钮被�
 
 test("启用失败：显示错误，按钮恢复，没有变成使用中", async () => {
   const p = await open("sites1,enable-fail");
-  await T(p, "enable-alpha-12").click();
+  await enableG(p, "enable-alpha-12");
   await T(p, "toast").waitFor();
   assert.match(await T(p, "toast").textContent(), /配置失败：无法连接到服务器，请检查网络/);
   assert.equal(await T(p, "enable-alpha-12").getAttribute("aria-label"), "启用");
   assert.equal(await T(p, "enable-alpha-12").isDisabled(), false);
-  assert.equal(await T(p, "client-status-claude").textContent(), "");
+  assert.equal(await T(p, "client-status-claude").textContent(), "未配置");
   await done(p);
 });
 
 test("启用时发现登录已过期：提示去重新登录，站点卡变红，分组消失", async () => {
   const p = await open("sites1,expire-on-enable");
-  await T(p, "enable-alpha-12").click();
+  await enableG(p, "enable-alpha-12");
   await waitText(p, "toast", /站点「Alpha」登录已过期/);
   await T(p, "relogin-alpha").waitFor();
   assert.match(await T(p, "site-error-alpha").textContent(), /登录已过期/);
@@ -344,7 +366,7 @@ test("暂时连不上的站点（网络问题）：提示会自动重试，有�
 
 test("移除站点：先确认；取消不动；确认后站点和它的分组消失，使用中的状态清掉", async () => {
   const p = await open("sites2");
-  await T(p, "enable-beta-Claude 逆向Kiro").click();
+  await enableG(p, "enable-beta-Claude 逆向Kiro");
   await p.waitForFunction(() => document.querySelector('[data-testid="client-status-claude"]')?.textContent === "Beta · Claude 逆向Kiro");
   await ctx(p, "site-beta", "remove");
   assert.match(await T(p, "remove-dialog").textContent(), /移除站点「Beta」/);
@@ -357,7 +379,7 @@ test("移除站点：先确认；取消不动；确认后站点和它的分组�
   await waitText(p, "toast", /已移除站点「Beta」/);
   assert.equal(await count(p, '[data-testid="site-beta"]'), 0);
   assert.equal(await count(p, '[data-testid^="group-card-beta-"]'), 0);
-  assert.equal(await T(p, "client-status-claude").textContent(), "");
+  assert.equal(await T(p, "client-status-claude").textContent(), "未配置");
   assert.equal(await count(p, '[data-testid="site-tab-all"]'), 0, "回到单站点，“全部站点”tab 消失");
   assert.equal(await count(p, '[data-testid^="site-tag-"]'), 0);
   await done(p);
@@ -397,13 +419,12 @@ test("配置冲突与客户端缺失：警告只出现在对应客户端", async
   await T(p, "conflict-banner").waitFor();
   assert.match(await T(p, "conflict-banner").textContent(), /ANTHROPIC_BASE_URL/);
   assert.match(await T(p, "client-claude").textContent(), /⚠/);
-  assert.match(await T(p, "nodir-banner").textContent(), /没有检测到 Claude Code/);
-  await T(p, "client-claude_desktop").click();
-  assert.match(await T(p, "conflict-banner").textContent(), /还没有切换到第三方推理模式/);
-  await T(p, "client-codex").click();
-  assert.equal(await count(p, '[data-testid="conflict-banner"]'), 0);
-  await T(p, "client-claude").click();
-  await T(p, "enable-alpha-12").click();
+  assert.equal(await T(p, "client-codex").textContent().then((x) => x.includes("⚠")), false, "没有冲突的客户端不标");
+  await T(p, "client-claude").hover();
+  await p.waitForFunction(() => /没有检测到配置目录/.test(document.getElementById("fd-tip")?.textContent ?? ""));
+  assert.match(await T(p, "conflict-banner-claude_desktop").textContent(), /还没有切换到第三方推理模式/);
+  assert.equal(await count(p, '[data-testid="conflict-banner-codex"]'), 0);
+  await enableG(p, "enable-alpha-12");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-alpha-12"]')?.textContent.includes("使用中"));
   await done(p);
 });
@@ -413,7 +434,7 @@ test("加载分组期间：侧边栏显示“加载中…”，不会误导为�
   await T(p, "loading").waitFor();
   assert.equal(await T(p, "client-status-claude").textContent(), "加载中…");
   await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await T(p, "client-status-claude").textContent(), "");
+  assert.equal(await T(p, "client-status-claude").textContent(), "未配置");
   await done(p);
 });
 
@@ -487,7 +508,7 @@ test("分组以横向列表展示：每行一个，名称、倍率、按钮在�
 test("最小窗口 1100×560：两个站点、使用中的卡片、站点卡都不溢出", async () => {
   const p = await open("sites2", { width: 1100, height: 560 });
   await T(p, "group-card-alpha-2").waitFor();
-  await T(p, "enable-beta-Claude 逆向Kiro").click();
+  await enableG(p, "enable-beta-Claude 逆向Kiro");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-beta-Claude 逆向Kiro"]')?.textContent.includes("使用中"));
   const { sw, cw } = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
   assert.ok(sw <= cw, `不应有横向滚动: ${sw} > ${cw}`);
@@ -545,7 +566,7 @@ test("时延排序：测速后点“时延”列按首字延迟升序，没测�
   await T(p, "sort-speed").click();
   const secs = (await p.locator('[data-testid^="speed-"]:not([data-testid="speed-test"])').allTextContents()).map((x) => parseFloat(x));
   assert.deepEqual(secs, [...secs].sort((a, b) => a - b));
-  await T(p, "enable-alpha-2").click();
+  await enableG(p, "enable-alpha-2");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-alpha-2"]')?.textContent.includes("使用中"));
   const border = await T(p, "group-card-alpha-2").evaluate((e) => getComputedStyle(e).boxShadow);
   assert.equal(border, "none", "使用中只靠文案提示，不加绿色外框");
@@ -612,7 +633,7 @@ test("测速是逐个进行的：任何时刻最多只有一个分组在测；�
 
 test("配置中：按钮里出现章鱼，五条腿在划动，完成后恢复", async () => {
   const p = await open("sites1,slow");
-  await T(p, "enable-alpha-2").click();
+  await enableG(p, "enable-alpha-2");
   await T(p, "octo-working").waitFor();
   assert.match(await T(p, "enable-alpha-2").textContent(), /配置中…/);
   await p.waitForFunction(() => {
@@ -795,10 +816,10 @@ test("切换智能体时清掉模型筛选，不会把 Claude 的筛选带到 Co
   await p.waitForFunction(() => !document.querySelector('[data-testid="speed-test"]')?.textContent.includes("停止"));
   await T(p, "model-filter").selectOption("claude-sonnet-5");
   assert.equal(await T(p, "model-filter").inputValue(), "claude-sonnet-5");
-  await T(p, "client-codex").click();
+  await T(p, "cat-openai").click();
   assert.equal(await T(p, "model-filter").inputValue(), "", "切到 Codex 后筛选已清除");
   assert.equal(await count(p, '[data-testid="empty-client"]'), 0, "不会因为沿用旧筛选而显示“没有提供…的分组”");
-  await T(p, "client-claude").click();
+  await T(p, "cat-claude").click();
   assert.equal(await T(p, "model-filter").inputValue(), "", "切回来也不会残留");
   await done(p);
 });
@@ -943,11 +964,11 @@ test("站点卡没有悬停图标，右键出菜单；分组行的启用图标�
   await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="enable-alpha-2"]')).opacity === "0");
   await T(p, "group-card-alpha-2").hover();
   await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="enable-alpha-2"]')).opacity === "1");
-  await T(p, "enable-alpha-2").click();
+  await enableG(p, "enable-alpha-2");
   await p.waitForFunction(() => document.querySelector('[data-testid="group-card-alpha-2"]')?.textContent.includes("使用中"));
   await p.mouse.move(2, 2);
   assert.equal(await T(p, "group-card-alpha-2").locator(".badge").isVisible(), true, "“使用中”不需要悬停");
-  assert.equal(await enableOpacity().catch(() => "gone"), "gone", "已启用的行不再有启用按钮");
+  assert.match(await T(p, "group-card-alpha-2").locator(".badge").textContent(), /使用中/, "已启用的行显示“使用中”（还能配到另一个客户端时带 ▾）");
   await done(p);
 });
 
@@ -1057,7 +1078,8 @@ test("鼠标移走后启动图标一定消失；界面重绘后悬停状态也�
   await p.mouse.move(2, 2);
   await p.waitForFunction(() => document.querySelectorAll(".card.is-hover, .site-card.is-hover").length === 0);
   for (const id of ["enable-alpha-2", "enable-alpha-4", "enable-alpha-12"]) {
-    await p.waitForFunction((t) => getComputedStyle(document.querySelector(`[data-testid="${t}"]`)).opacity === "0", id, { timeout: 2000 }).catch(() => {});
+    await p.waitForFunction((t) => getComputedStyle(document.querySelector(`[data-testid="${t}"]`)).opacity === "0", id, { timeout: 5000 }).catch(() => {});
+    await p.waitForTimeout(100); // 重绘中途节点会被换掉：等一下再取
     assert.equal(await op(id), "0", `${id} 不应残留`);
   }
   // 连着扫过三行，也只有鼠标当前所在的那一行显示
@@ -1142,14 +1164,12 @@ test("添加没有对分组分类的站点（new-api）后弹窗说明对体验�
   const text = await T(p, "unclassified-dialog").textContent();
   assert.match(text, /该站点没有对分组分类/);
   assert.match(text, /「beta\.example\.com」/, "说明是哪个站点（添加时用的站点名）");
-  assert.match(text, /每一种客户端下都列出来/);
+  assert.match(text, /自动识别|归在“其他”/);
   assert.doesNotMatch(text, /用起来会失败|卡片上会标注|建议：先看/, "只保留第一条说明");
   assert.equal(await p.evaluate(() => document.activeElement?.getAttribute("data-testid")), "unclassified-ok", "“确定”默认聚焦，回车即可关闭");
   assert.match(await T(p, "toast").textContent(), /已添加站点/, "添加成功的提示仍然在");
   await T(p, "unclassified-ok").click();
   assert.equal(await count(p, '[data-testid="unclassified-dialog"]'), 0, "点确定后关闭");
-  // 站点已添加，分组列表里这个站点的分组带着“未分类”标注
-  assert.equal(await count(p, '[data-testid^="unclassified-beta-"]') > 0, true);
   await done(p);
 
   // 添加 sub2api 站点（分组有分类）：不弹
@@ -1240,7 +1260,7 @@ test("模型下拉的候选项恰好是当前列出的分组的模型（去重�
   assert.ok(!alpha.includes("beta-only-model"), "Beta 独有的模型不该出现在 Alpha 的候选项里");
   await p.mouse.move(0, 0);
   await T(p, "site-tab-all").click();
-  await T(p, "client-codex").click();
+  await T(p, "cat-openai").click();
   await check("Codex 标签");
   await done(p);
 });
@@ -1469,10 +1489,11 @@ test("左侧是站点列表（名称 + 余额），客户端 tab 在内容区顶
   await T(p, "group-card-alpha-2").waitFor();
   const titles = await p.locator(".sidebar .side-title").allTextContents();
   assert.deepEqual(titles, ["上游站点"], "左侧只有“上游站点”（没有管理员站点时没有“我的中转站”）");
-  assert.equal(await count(p, ".sidebar [data-testid^='client-']"), 0, "客户端不在左侧");
+  assert.equal(await count(p, ".sidebar [data-testid^='client-'], .sidebar [data-testid^='cat-']"), 0, "类别 tab 和客户端状态不在左侧");
   assert.equal(await p.evaluate(() => !!document.querySelector('.sidebar [data-testid="site-tabs"] [data-testid="site-alpha"]')), true, "站点在左侧");
-  assert.equal(await p.evaluate(() => document.querySelectorAll('.content [data-testid="client-tabs"] [data-testid^="client-"]').length > 0 && !document.querySelector('.content [data-testid="site-tabs"]')), true, "客户端 tab 在右侧内容区顶部");
-  assert.deepEqual(await p.locator('[data-testid="client-tabs"] .side-name').allTextContents(), ["Claude Code", "Claude Desktop", "Codex", "Gemini CLI"]);
+  assert.equal(await p.evaluate(() => document.querySelectorAll('.content [data-testid="client-tabs"] [data-testid^="cat-"]').length > 0 && !document.querySelector('.content [data-testid="site-tabs"]')), true, "类别 tab 在右侧内容区顶部");
+  assert.deepEqual(await p.locator('[data-testid="client-tabs"] .side-name').allTextContents(), ["全部", "Claude", "OpenAI", "Gemini", "其他"], "有分组的类别才出现（模拟数据里 Grok 归“其他”）");
+  assert.deepEqual(await p.locator('[data-testid="client-status-row"] .chip-name').allTextContents(), ["Claude Code", "Claude Desktop", "Codex", "Gemini CLI"], "四个客户端各自在用哪个分组，只读");
   assert.equal(await count(p, '[data-testid^="site-account-"]'), 0, "不显示用户名");
   assert.equal(await T(p, "site-balance-alpha").textContent(), "$99.78");
   assert.deepEqual(await p.locator('[data-testid="site-tabs"] .site-tab').evaluateAll((es) => es.map((e) => e.querySelector(".tab-name")?.textContent ?? "+")), ["全部站点", "Alpha", "Beta", "+"]);
@@ -2045,50 +2066,38 @@ test("修改分组支持的客户端：多选保存后分组出现在对应客�
   await T(p, "group-card-alpha-2").waitFor();
   await p.waitForFunction(() => !document.body.textContent.includes("读取中…")); // 后台读成本会频繁重绘，等它读完再操作
   assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 1);
-  await T(p, "client-codex").click();
+  await T(p, "cat-openai").click();
   assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "Claude 类分组默认不在 Codex 下");
-  await T(p, "client-claude").click();
-  // 客户端列：药丸显示现在配置到哪些客户端，点开多选下拉，关闭时保存
+  await T(p, "cat-claude").click();
+  // 类别列：药丸显示分组的模型类别（自动识别的是虚线），点开多选下拉，关闭时保存
   assert.match(await T(p, "clients-alpha-2").textContent(), /Claude/);
+  assert.match(await T(p, "clients-alpha-2").getAttribute("class"), /auto/, "没手动设置过：虚线，表示是自动识别的");
   await T(p, "clients-alpha-2").click();
   await T(p, "clients-picker").waitFor();
   assert.equal(await T(p, "ec-claude").isChecked(), true);
-  assert.equal(await T(p, "ec-codex").isChecked(), false);
-  await T(p, "ec-codex").click();
-  await T(p, "ec-gemini").click();
-  await T(p, "ec-claude_desktop").click();
+  assert.equal(await T(p, "ec-openai").isChecked(), false);
+  assert.equal(await count(p, '[data-testid="ec-deepseek"], [data-testid="ec-video"], [data-testid="ec-audio"], [data-testid="ec-other"]'), 4, "有 DeepSeek / 视频 / 音频 / 其他 等类别");
+  await T(p, "ec-openai").click();
+  await T(p, "ec-video").click();
   assert.deepEqual(await opsLog(p), [], "还没关闭下拉，不保存");
   await p.keyboard.press("Escape");
   await T(p, "clients-picker").waitFor({ state: "detached" });
-  await p.waitForFunction(() => /^clients:alpha:2:claude,codex,gemini$/.test((window.__adminOps ?? []).at(-1) ?? ""));
-  await T(p, "client-codex").click();
+  await p.waitForFunction(() => /^clients:alpha:2:claude,openai,video$/.test((window.__adminOps ?? []).at(-1) ?? ""));
+  await p.waitForFunction(() => !/auto/.test(document.querySelector('[data-testid="clients-alpha-2"]')?.className ?? "auto")); // 手动设置后是实线
+  await T(p, "cat-openai").click();
   await T(p, "group-card-alpha-2").waitFor();
-  await T(p, "client-claude_desktop").click();
-  assert.equal(await count(p, '[data-testid="group-card-alpha-2"]'), 0, "取消勾选的客户端下不再出现");
-  // 全部取消 = 恢复站点给的默认分类；点别处也会关闭并保存
-  await T(p, "client-claude").click();
+  await T(p, "cat-video").click();
+  await T(p, "group-card-alpha-2").waitFor();
+  assert.equal(await count(p, '[data-testid="enable-alpha-2"]'), 1, "含 Claude / OpenAI 类，仍可一键配置");
+  // 全部取消 = 恢复自动识别；点别处也会关闭并保存
+  await T(p, "cat-all").click();
   await T(p, "clients-alpha-2").click();
-  for (const c of ["claude", "codex", "gemini"]) await T(p, `ec-${c}`).click();
+  for (const c of ["claude", "openai", "video"]) await T(p, `ec-${c}`).click();
   await p.mouse.click(5, 5);
   await T(p, "clients-picker").waitFor({ state: "detached" });
   await p.waitForFunction(() => /^clients:alpha:2:-$/.test((window.__adminOps ?? []).at(-1) ?? ""));
-  await T(p, "client-codex").click();
+  await T(p, "cat-openai").click();
   await p.waitForFunction(() => !document.querySelector('[data-testid="group-card-alpha-2"]'));
-  await done(p);
-});
-
-test("客户端列：站点没给分类的分组显示“未设置”，下拉里默认全不选；表头有“客户端”列", async () => {
-  const p = await open("sites2");
-  await T(p, "group-card-alpha-2").waitFor();
-  assert.match(await T(p, "list-head").textContent(), /客户端/);
-  const unset = p.locator('[data-testid^="clients-beta-"]').first();
-  await unset.waitFor();
-  assert.equal((await unset.textContent()).replace("▾", "").trim(), "未设置");
-  await unset.click();
-  await T(p, "clients-picker").waitFor();
-  for (const c of ["claude", "claude_desktop", "codex", "gemini"]) assert.equal(await T(p, `ec-${c}`).isChecked(), false, `${c} 默认不选`);
-  await p.keyboard.press("Escape");
-  assert.deepEqual(await opsLog(p), [], "什么都没选就不保存");
   await done(p);
 });
 
@@ -2185,7 +2194,7 @@ test("左侧导航同一时间只有一张卡片处于激活；在中转站管�
 test("检查更新的左边显示当前版本号", async () => {
   const p = await open("sites1");
   await T(p, "app-version").waitFor();
-  assert.equal(await T(p, "app-version").textContent(), "v0.5.3");
+  assert.equal(await T(p, "app-version").textContent(), "v0.5.4");
   const xs = await p.evaluate(() => ["app-version", "check-update"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
   assert.ok(xs[0] < xs[1], `版本号在“检查更新”左边: ${xs}`);
   await done(p);
@@ -2490,31 +2499,79 @@ test("基于上游分组创建下游：除了新建，也可以选择已有的�
   await done(p);
 });
 
-test("添加上游 / 创建下游后，上游默认不暂停（调度开启，直接参与调度）", async () => {
+test("类别 tab：按模型名自动识别 DeepSeek / 视频 / 音频等；一个分组可以属于多类；没有对应客户端的显示“不可配置”", async () => {
+  const p = await open("sites1,media", undefined, { tab: "all" });
+  await T(p, "group-card-alpha-31").waitFor();
+  assert.deepEqual(await p.locator('[data-testid="client-tabs"] .side-name').allTextContents(), ["全部", "Claude", "OpenAI", "Gemini", "DeepSeek", "视频", "音频", "其他"]);
+  await T(p, "cat-deepseek").click();
+  assert.deepEqual(await p.locator('[data-testid^="group-card-"]').evaluateAll((es) => es.map((e) => e.getAttribute("data-testid")).sort()), ["group-card-alpha-31", "group-card-alpha-34"], "DeepSeek 官方 + 混合分组（混合分组同时属于多类）");
+  await T(p, "cat-claude").click();
+  assert.equal(await count(p, '[data-testid="group-card-alpha-34"]'), 1, "混合分组也在 Claude 里");
+  await T(p, "cat-video").click();
+  assert.equal(await cards(p), 1);
+  assert.equal(await T(p, "noconfig-alpha-32").textContent(), "不可配置");
+  assert.equal(await count(p, '[data-testid="enable-alpha-32"]'), 0, "视频分组没有启用按钮");
+  await T(p, "cat-audio").click();
+  assert.equal(await T(p, "noconfig-alpha-33").textContent(), "不可配置");
+  await T(p, "cat-other").click();
+  await T(p, "group-card-alpha-17").waitFor();
+  assert.equal(await T(p, "clients-alpha-17").getAttribute("class").then((c) => /auto/.test(c)), true);
+  await T(p, "clients-alpha-17").click();
+  for (const c of ["claude", "openai", "gemini", "deepseek", "cn", "image", "video", "audio", "embed", "other"]) assert.equal(await count(p, `[data-testid="ec-${c}"]`), 1);
+  await p.keyboard.press("Escape");
+  assert.deepEqual(await opsLog(p), [], "什么都没改就不保存");
+  await done(p);
+});
+
+test("添加上游后，上游默认不暂停（调度开启，直接参与调度）", async () => {
   const p = await open("sites2,admin,plaza");
   await T(p, "operator-alpha").click();
   await T(p, "down-addup-4").click({ force: true });
   await T(p, "au-submit").click();
   await T(p, "add-upstream-result").waitFor();
-  assert.match(await opsLog(p).then((l) => l.at(-1)), /^add-upstream:.*:false/, "paused = false");
+  assert.match((await opsLog(p)).at(-1), /^add-upstream:.*:false/, "paused = false");
   assert.match(await T(p, "add-upstream-result").textContent(), /已经启用，正在参与调度/);
   assert.equal(await count(p, '[data-testid="au-resume"]'), 0, "不需要再点“启用”");
   await done(p);
 });
 
-test("客户端分类有“其他”：下拉里能选，选了出现“其他”tab，里面的分组不能一键配置", async () => {
-  const p = await open("sites2");
-  await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await count(p, '[data-testid="client-other"]'), 0, "没有分组归在“其他”时不显示这个 tab");
-  await T(p, "clients-alpha-2").click();
-  assert.match(await T(p, "clients-picker").textContent(), /其他/);
-  await T(p, "ec-other").click();
+test("自定义类别：起名字 + 写模型名关键词，匹配的分组自动归进来；也可手动勾选；删除后分组不丢", async () => {
+  const p = await open("sites1,media", undefined, { tab: "all" });
+  await T(p, "group-card-alpha-32").waitFor();
+  await T(p, "manage-categories").click();
+  await T(p, "categories-dialog").waitFor();
+  await T(p, "cc-add").click();
+  await T(p, "cc-name-0").fill("视频生成");
+  await T(p, "cc-keywords-0").fill("Seedance，veo");
+  await T(p, "cc-save").click();
+  await T(p, "categories-dialog").waitFor({ state: "detached" });
+  assert.match((await opsLog(p)).at(-1), /^custom-categories:视频生成=seedance\|veo$/, "关键词小写去重");
+  // 新 tab 出现，匹配到“Seedance 视频”分组（模型名含 seedance / veo）
+  const tab = p.locator('[data-testid^="cat-c_"]').first();
+  await tab.waitFor();
+  assert.match(await tab.textContent(), /视频生成/);
+  await tab.click();
+  assert.deepEqual(await p.locator('[data-testid^="group-card-"]').evaluateAll((es) => es.map((e) => e.getAttribute("data-testid"))), ["group-card-alpha-32"]);
+  // 手动再把“DeepSeek 官方”勾进这一类
+  await T(p, "cat-all").click();
+  await T(p, "clients-alpha-31").click();
+  await p.locator('[data-testid="clients-picker"] label', { hasText: "视频生成" }).locator("input").click();
   await p.keyboard.press("Escape");
-  await p.waitForFunction(() => /^clients:alpha:2:claude,claude_desktop,other$/.test((window.__adminOps ?? []).at(-1) ?? ""));
-  await T(p, "client-other").waitFor();
-  await T(p, "client-other").click();
-  await T(p, "group-card-alpha-2").waitFor();
-  assert.equal(await count(p, '[data-testid="enable-alpha-2"]'), 0, "“其他”里没有启用按钮");
-  assert.equal(await T(p, "noconfig-alpha-2").textContent(), "不可配置");
+  await p.waitForFunction(() => /^clients:alpha:31:.*c_/.test((window.__adminOps ?? []).at(-1) ?? ""));
+  await p.locator('[data-testid^="cat-c_"]').first().click();
+  await p.waitForFunction(() => document.querySelectorAll('[data-testid^="group-card-"]').length === 2);
+  // 名称重复 / 和内置同名：保存失败并提示
+  await T(p, "manage-categories").click();
+  await T(p, "cc-add").click();
+  await T(p, "cc-name-1").fill("视频");
+  await T(p, "cc-save").click();
+  await p.waitForFunction(() => /已经有名为「视频」的类别/.test(document.querySelector('[data-testid="cc-error"]')?.textContent ?? ""));
+  // 删除：分组还在，回到“全部”
+  await T(p, "cc-remove-1").click();
+  await T(p, "cc-remove-0").click();
+  await T(p, "cc-save").click();
+  await T(p, "categories-dialog").waitFor({ state: "detached" });
+  assert.equal(await count(p, '[data-testid^="cat-c_"]'), 0);
+  assert.equal(await count(p, '[data-testid="group-card-alpha-32"]'), 1, "分组没被删");
   await done(p);
 });
