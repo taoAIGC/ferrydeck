@@ -33,6 +33,8 @@ pub struct AppState {
     pub sites: RwLock<Vec<Arc<SiteRuntime>>>,
     /// 最近一次汇总到的分组，用来生成菜单栏菜单。
     pub groups: Mutex<Vec<GroupView>>,
+    /// 主窗口读到的各分组的模型（站点id\u{1}分组id → 模型）：菜单栏面板按它识别分组的类别，不用自己再向站点要。
+    pub models: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,7 +54,7 @@ pub struct SiteView {
 
 impl AppState {
     pub fn new(paths: Paths) -> Self {
-        AppState { paths, sites: RwLock::new(vec![]), groups: Mutex::new(vec![]) }
+        AppState { paths, sites: RwLock::new(vec![]), groups: Mutex::new(vec![]), models: Mutex::new(Default::default()) }
     }
 
     /// 建立站点运行时。凭据轮换时自动写回应用数据目录。

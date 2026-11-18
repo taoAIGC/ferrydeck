@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { octopusWorking } from "./octopus";
 import { agoText, startAgoTicker } from "./time";
 import { initHover, syncHover } from "./hover";
-import type { ClientId, ClientOverview, GroupView, SiteView } from "./types";
+import { allCategories, categoriesOf as categoriesOfG, clientsOf as clientsOfG } from "./categories";
+import type { CategoryId, ClientId, ClientOverview, CustomCategory, GroupView, SiteView } from "./types";
 
 /**
  * 菜单栏面板。点菜单栏图标打开，点屏幕其他位置关闭（由 Rust 端监听）。
@@ -25,10 +26,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
   return e;
 }
 
-const CLIENT_ORDER: ClientId[] = ["claude", "claude_desktop", "codex", "gemini"];
 const CLIENT_NAME: Record<ClientId, string> = { claude: "Claude Code", claude_desktop: "Claude Desktop", codex: "Codex", gemini: "Gemini CLI" };
-/** 标签页上的短名称：四个客户端要在一行里完整显示 */
-const TAB_NAME: Record<ClientId, string> = { claude: "Claude Code", claude_desktop: "Desktop", codex: "Codex", gemini: "Gemini" };
 
 const root = document.getElementById("panel")!;
 const closed = () => void invoke("panel_close").catch(() => undefined);
@@ -36,7 +34,20 @@ const openMain = () => void invoke("panel_open_main").then(closed).catch(() => u
 /** 面板里的操作记进诊断日志：用户反馈“点了没反应”时，能看出点击到底有没有传到界面 */
 const note = (what: string) => void invoke("panel_note", { what }).catch(() => undefined);
 
-let tab: ClientId = "claude";
+/** 当前类别 tab：和主窗口共用同一份记忆（localStorage 同源时共享），没有就是“全部” */
+const TAB_KEY = "ferrydeck.category";
+let tab: string = (() => {
+  try {
+    return localStorage.getItem(TAB_KEY) || "all";
+  } catch {
+    return "all";
+  }
+})();
+let customCats: CustomCategory[] = [];
+/** 主窗口共享的各分组的模型（站点id\u0001分组id → 模型），用来识别类别 */
+let sharedModels: Record<string, string[]> = {};
+/** 正在选“配置到哪个客户端”的那一行 */
+let picking: string | null = null;
 let groups: GroupView[] = [];
 let sites: SiteView[] = [];
 let overview: ClientOverview[] = [];
@@ -49,12 +60,13 @@ let refreshing = false;
 /** 重新渲染会替换整个列表，记住滚动位置，避免列表跳动 */
 let scrollTop = 0;
 
-const active = (c: ClientId) => {
-  const o = overview.find((x) => x.client === c);
-  return o?.in_use ? o.active : null;
-};
 const multiSite = () => sites.length > 1;
 const gkey = (g: GroupView) => `${g.site_id}\u0001${g.id}`;
+const modelsOf = (g: GroupView): string[] => sharedModels[gkey(g)] ?? g.models ?? [];
+const categoriesOf = (g: GroupView): CategoryId[] => categoriesOfG(g, modelsOf(g), customCats);
+const clientsOf = (g: GroupView): ClientId[] => clientsOfG(g, modelsOf(g), customCats);
+/** 这个分组正在被哪些客户端使用 */
+const usedBy = (g: GroupView): ClientId[] => overview.filter((o) => o.in_use && o.active && o.active.site_id === g.site_id && o.active.group_id === g.id).map((o) => o.client);
 
 function powerIcon(): Node {
   const t = document.createElement("template");
@@ -99,11 +111,12 @@ async function refresh(maxAge = 60) {
     sites = r.sites;
     fetchedAt = r.fetched_at;
     overview = (await invoke("overview")) as ClientOverview[];
+    // 类别要用的两样东西：自定义类别、主窗口读到的各分组的模型（都不向站点发请求）
+    customCats = ((await invoke("get_custom_categories").catch(() => [])) as CustomCategory[]) ?? [];
+    sharedModels = ((await invoke("cached_models").catch(() => ({}))) as Record<string, string[]>) ?? {};
     loadError = "";
-    // 当前客户端没有分组时切到第一个有分组的
-    if (!groups.some((g) => g.clients.includes(tab))) {
-      tab = CLIENT_ORDER.find((c) => groups.some((g) => g.clients.includes(c))) ?? tab;
-    }
+    // 当前类别里已经没有分组了：回到“全部”
+    if (tab !== "all" && !groups.some((g) => categoriesOf(g).includes(tab))) tab = "all";
   } catch (e) {
     loadError = String(e);
   } finally {
@@ -133,20 +146,31 @@ function refreshIcon(): Node {
   return t.content.firstChild!;
 }
 
-async function enable(g: GroupView) {
+async function enable(g: GroupView, client: ClientId) {
   if (busy) return;
   busy = gkey(g);
+  picking = null;
   render();
   try {
-    await invoke("enable_group", { siteId: g.site_id, groupId: g.id, client: tab, model: null });
+    await invoke("enable_group", { siteId: g.site_id, groupId: g.id, client, model: null });
     overview = (await invoke("overview")) as ClientOverview[];
-    flash(`已把「${g.name}」配置到 ${CLIENT_NAME[tab]}`);
+    flash(`已把「${g.name}」配置到 ${CLIENT_NAME[client]}`);
   } catch (e) {
     flash(String(e));
   } finally {
     busy = null;
     render();
   }
+}
+
+/** 点一行：还能配到的客户端只有一个就直接配；有两个（Claude 类：Claude Code / Claude Desktop）就在这一行下面展开选择。 */
+function rowClick(g: GroupView) {
+  const used = usedBy(g);
+  const free = clientsOf(g).filter((c) => !used.includes(c));
+  if (free.length === 0) return;
+  if (free.length === 1) return void enable(g, free[0]);
+  picking = picking === gkey(g) ? null : gkey(g);
+  render();
 }
 
 function render() {
@@ -156,34 +180,46 @@ function render() {
     root.replaceChildren(el("div", { class: "fd-panel" }, el("p", { class: "muted" }, "还没有添加站点。"), el("button", { class: "primary wide", onClick: openMain }, "打开 Ferrydeck")));
     return;
   }
-  const tabs = el(
-    "div",
-    { class: "panel-tabs" },
-    ...CLIENT_ORDER.map((c) => el("button", { class: `panel-tab${tab === c ? " on" : ""}`, "data-testid": `panel-tab-${c}`, title: CLIENT_NAME[c], onClick: () => { note(`切换到 ${c}`); tab = c; scrollTop = 0; render(); } }, TAB_NAME[c])),
-  );
-  const a = active(tab);
-  const list = groups.filter((g) => g.clients.includes(tab));
-  const rows = list.map((g) => {
-    const isActive = !!a && a.site_id === g.site_id && a.group_id === g.id;
-    return el(
+  const count = (c: string) => groups.filter((g) => categoriesOf(g).includes(c)).length;
+  const tabOf = (id: string, name: string, n: number) =>
+    el("button", { class: `panel-tab${tab === id ? " on" : ""}`, "data-testid": `panel-tab-${id}`, title: `${name}（${n} 个分组）`, onClick: () => { note(`切换到 ${id}`); tab = id; picking = null; scrollTop = 0; try { localStorage.setItem(TAB_KEY, id); } catch { /* 记不住就算了 */ } render(); } }, name);
+  const tabs = el("div", { class: "panel-tabs" }, tabOf("all", "全部", groups.length), ...allCategories(customCats).filter((c) => count(c.id) > 0).map((c) => tabOf(c.id, c.name, count(c.id))));
+  const list = groups.filter((g) => tab === "all" || categoriesOf(g).includes(tab));
+  const rows = list.flatMap((g) => {
+    const used = usedBy(g);
+    const cl = clientsOf(g);
+    const free = cl.filter((c) => !used.includes(c));
+    const isActive = used.length > 0 && free.length === 0;
+    const partial = used.length > 0 && free.length > 0;
+    const row = el(
       "button",
-      { class: `panel-row${isActive ? " active" : ""}`, "data-testid": `panel-row-${g.site_id}-${g.id}`, disabled: busy !== null, onClick: () => void enable(g) },
+      { class: `panel-row${used.length ? " active" : ""}`, "data-testid": `panel-row-${g.site_id}-${g.id}`, disabled: busy !== null || cl.length === 0, onClick: () => rowClick(g) },
       el("span", { class: "panel-row-main" }, el("span", { class: "panel-row-name" }, g.name), multiSite() ? el("span", { class: "muted small" }, g.site_name) : null),
       el(
         "span",
         { class: "panel-row-side" },
         el("span", { class: "muted small" }, `×${g.rate_multiplier}`),
-        // 正在配置这一行：章鱼划腿干活；已在使用：文案；否则是启用图标
-        busy === gkey(g) ? el("span", { class: "panel-working" }, octopusWorking(16), el("span", { class: "small muted" }, "配置中…")) : isActive ? el("span", { class: "badge" }, "使用中") : el("span", { class: "panel-power" }, powerIcon()),
+        // 正在配置这一行：章鱼划腿干活；已在使用：文案；没有对应客户端的类别（视频、音频…）：不可配置；否则是启用图标
+        busy === gkey(g)
+          ? el("span", { class: "panel-working" }, octopusWorking(16), el("span", { class: "small muted" }, "配置中…"))
+          : isActive
+            ? el("span", { class: "badge", title: `正在被 ${used.map((c) => CLIENT_NAME[c]).join("、")} 使用` }, "使用中")
+            : cl.length === 0
+              ? el("span", { class: "muted small", title: "这个分组的模型类别没有对应的一键配置客户端，请到主窗口查看" }, "不可配置")
+              : partial
+                ? el("span", { class: "badge partial", title: `正在被 ${used.map((c) => CLIENT_NAME[c]).join("、")} 使用；点击还可以配置到 ${free.map((c) => CLIENT_NAME[c]).join("、")}` }, "使用中 ▾")
+                : el("span", { class: "panel-power" }, powerIcon()),
       ),
     );
+    if (picking !== gkey(g) || free.length < 2) return [row];
+    return [row, el("div", { class: "panel-pick", "data-testid": `panel-pick-${g.site_id}-${g.id}` }, ...free.map((c) => el("button", { class: "ghost small-btn", "data-testid": `panel-pick-${c}`, onClick: () => void enable(g, c) }, `配置到 ${CLIENT_NAME[c]}`)))];
   });
   root.replaceChildren(
     el(
       "div",
       { class: "fd-panel" },
       tabs,
-      el("div", { class: "panel-list" }, ...(rows.length > 0 ? rows : [el("p", { class: "muted small" }, loadError ? `加载失败：${loadError}` : `没有可用于 ${CLIENT_NAME[tab]} 的分组。`)])),
+      el("div", { class: "panel-list" }, ...(rows.length > 0 ? rows : [el("p", { class: "muted small" }, loadError ? `加载失败：${loadError}` : "没有可用的分组。")])),
       el(
         "div",
         { class: "panel-foot" },

@@ -33,7 +33,7 @@
 - 添加多个站点，自动识别 new-api / sub2api，用站点的账号密码登录；所有站点的分组合并显示，同名分组并存，可按站点筛选。也支持 `http://` 的自建站（会提示账号密码和 Key 明文传输）
 - 分组按**模型类别**分 tab：全部 / Claude / OpenAI / Gemini / DeepSeek / 国产文本 / 图像 / 视频 / 音频 / 嵌入与重排 / 其他。类别先看你手动设置的，再看站点给的平台，最后按分组里的模型名自动识别；一个分组可以同时属于多类。识别不准的，点「类别」列手动改；也可以**自定义类别**：点 tab 末尾的「＋ 类别」，自己起名字、写几个模型名关键词（如 `seedance，veo`），分组名或模型名含关键词的自动归进来，也能手动勾选；保存在本机，删除类别不会删分组
 - 只有 Claude / OpenAI / Gemini 类的分组能「启用」：自动创建（或复用）名为 `Ferrydeck-<分组名>` 的专用 Key 并写进客户端配置。Claude 类可以选配到 Claude Code 或 Claude Desktop，OpenAI 类配到 Codex，Gemini 类配到 Gemini CLI；视频、音频、DeepSeek 等分组显示「不可配置」，但同样能看倍率、成本、延迟和做 sayhi 测试。写入前自动备份，写入后自检，不对就自动回滚，只改自己管的项
-- 内容区顶部一行小标签显示四个客户端（Claude Code / Claude Desktop / Codex / Gemini CLI）各自正在用哪个分组；关闭窗口后常驻菜单栏，点图标弹出面板可直接切换分组
+- 内容区顶部一行小标签显示四个客户端（Claude Code / Claude Desktop / Codex / Gemini CLI）各自正在用哪个分组；关闭窗口后常驻菜单栏，点图标弹出面板，分组的类别 tab 和主窗口一致（含自定义类别），点一行即可切换；Claude 类分组会展开让你选配到 Claude Code 还是 Claude Desktop
 - 左侧是**我的中转站**（站长模式才有）和**上游站点**（你登录了账号的站点，名称 + 余额，点击筛选右边的分组）。站点卡片上点**右键**：上游站点是「控制台 / 充值 / 删除」，我的中转站是「控制台 / 删除」
 - 每个站点独立显示余额；某个站点登录过期只影响它自己，站点旁有红色感叹号，内容区顶部有带「重试 / 重新登录」的提示
 
@@ -165,7 +165,7 @@ app/
     session_store.rs      登录凭据保存到应用数据目录（0600 文件）
   src-tauri/tests/        Rust 测试
   ui-tests/               界面自动化测试
-  panel.html + src/panel.ts 菜单栏面板（点菜单栏图标弹出的窗口）
+  panel.html + src/panel.ts 菜单栏面板（点菜单栏图标弹出的窗口）；类别识别规则在 src/categories.ts，主窗口和面板共用
 scripts/                  install.sh / release.sh / deploy.sh / render-icons.mjs（图标源文件在 app/src-tauri/icons/source/）
 docs/                     设计说明、截图
 ```

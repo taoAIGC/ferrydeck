@@ -2,8 +2,9 @@
 .panel-body { margin: 0; background: transparent; overflow: hidden; }
 .fd-panel { display: flex; flex-direction: column; height: 100vh; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .fd-panel > p { padding: 16px; }
-.panel-tabs { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); }
-.panel-tab { flex: 1 1 0; min-width: 0; padding: 5px 4px; font-size: 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-tabs { display: flex; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.panel-tabs::-webkit-scrollbar { display: none; }
+.panel-tab { flex: 1 0 auto; min-width: 0; padding: 5px 4px; font-size: 12px; border-radius: 7px; border: 1px solid transparent; background: transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .panel-tab.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .panel-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
 .panel-row { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; border: 1px solid transparent; border-radius: 8px; }
@@ -24,3 +25,7 @@
 /* 面板里的“启用”图标平时隐藏，鼠标移到这一行（或键盘聚焦）才显示；“使用中”和“配置中”一直显示 */
 .panel-power { display: inline-flex; opacity: 0; transition: opacity 0.12s ease; }
 .panel-row.is-hover .panel-power, .panel-row:focus-visible .panel-power { opacity: 1; }
+
+.panel-pick { display: flex; gap: 6px; padding: 2px 9px 6px; }
+.panel-pick button { flex: 1; white-space: nowrap; }
+.badge.partial { background: var(--ok); }

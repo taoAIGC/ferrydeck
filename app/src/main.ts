@@ -3,7 +3,8 @@ import { octopusSpinner, octopusWorking } from "./octopus";
 import { agoText, fullTime, startAgoTicker } from "./time";
 import { initHover, syncHover } from "./hover";
 import { backend, isMock } from "./backend";
-import { CLIENTS, CLIENT_ORDER, BUILTIN_CATEGORIES, KIND_LABEL, type CustomCategory, type CategoryId, type TabId, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
+import { allCategories as allCategoriesOf, categoriesOf as categoriesOfG, clientsOf as clientsOfG } from "./categories";
+import { CLIENTS, CLIENT_ORDER, KIND_LABEL, type CustomCategory, type CategoryId, type TabId, type CreatedDownstream, type DownstreamRef, type SayHi, type AddedUpstream, type AdminOverview, type LinkReport, type UpstreamLink, type Downstream, type GroupEdit, type SiteKind, type Upstream, type ClientId, type ClientOverview, type DataLoss, type DetectedSite, type GroupUsage, type GroupView, type SiteView, type UpdateInfo } from "./types";
 
 type Toast = { kind: "ok" | "err" | "info"; text: string } | null;
 
@@ -211,6 +212,13 @@ function rememberCost(g: { site_id: string; id: string }, u: GroupUsage) {
   }
 }
 
+/** 把读到的各分组的模型共享给后端：菜单栏面板按它识别类别，不用自己再向站点要。 */
+let shareTimer: number | undefined;
+function shareModels() {
+  if (isMock) return;
+  window.clearTimeout(shareTimer);
+  shareTimer = window.setTimeout(() => void invoke("share_models", { models: { ...state.models, ...state.allModels } }).catch(() => undefined), 400);
+}
 const TAB_KEY = "ferrydeck.category";
 const state = {
   view: "boot" as "boot" | "main",
@@ -382,6 +390,7 @@ async function refreshAll(maxAgeSecs = 0, opts: { models?: boolean; forceCosts?:
   try {
     const [r, overview] = await Promise.all([backend.listGroups(maxAgeSecs), backend.overview()]);
     state.groups = r.groups;
+    shareModels();
     state.sites = r.sites;
     state.fetchedAt = r.fetched_at;
     state.overview = overview;
@@ -472,6 +481,7 @@ async function loadAllModels() {
   try {
     const map = await backend.groupModelsMap();
     state.allModels = { ...state.allModels, ...map };
+    shareModels();
     render();
     delete state.fails.models;
   } catch (e) {
@@ -497,6 +507,7 @@ async function loadActiveModels() {
     if (state.models[k]) continue;
     try {
       state.models[k] = await backend.groupModels(a.site_id, a.group_id);
+      shareModels();
       render();
     } catch {
       /* 模型列表加载失败不影响使用，下拉框保持只显示当前模型 */
@@ -512,6 +523,7 @@ async function enable(g: GroupView, model?: string | null, client?: ClientId) {
   try {
     const out = await backend.enableGroup(g.site_id, g.id, target, model ?? null);
     state.models[gkey(g)] = out.models;
+    shareModels();
     await refreshOverview();
     const c = CLIENTS[out.client];
     if (model) showToast("ok", `已切换模型为 ${out.model}`);
@@ -1007,55 +1019,12 @@ function modelsOf(g: GroupView): string[] {
   return state.allModels[gkey(g)] ?? state.models[gkey(g)] ?? g.models ?? [];
 }
 
-/** 按模型名识别类别（小写匹配）。顺序无关：一个分组里有几类模型就属于几类。 */
-const CATEGORY_RULES: [CategoryId, RegExp][] = [
-  ["claude", /^claude|anthropic|^fable|^opus|^sonnet|^haiku/],
-  ["openai", /^gpt(?!.*image)|^o[134](-|$)|^chatgpt|^codex|^text-davinci/],
-  ["gemini", /^gemini(?!.*image)/],
-  ["deepseek", /deepseek/],
-  ["cn", /kimi|moonshot|^glm|zhipu|qwen|qwq|ernie|^doubao(?!.*seed(ance|ream))|hunyuan|minimax|^yi-|baichuan|^spark|^step-|^mimo|longcat/],
-  ["image", /image|dall-?e|^flux|midjourney|^mj|sdxl|stable-?diffusion|imagen|nano-?banana|seedream|^sd[0-9]/],
-  ["video", /video|^sora|^veo|kling|seedance|runway|^wan|hailuo|^pika|^vidu|cogvideo/],
-  ["audio", /tts|whisper|audio|speech|^suno|asr|transcribe|voice|^music/],
-  ["embed", /embed|rerank|^bge-/],
-];
-/** 全部类别（界面顺序）：内置的（不含“其他”）→ 自定义的 → 其他。 */
-const allCategories = (): { id: CategoryId; name: string; tip: string; custom?: boolean }[] => [
-  ...BUILTIN_CATEGORIES.filter((c) => c.id !== "other"),
-  ...state.customCats.map((c) => ({ id: c.id, name: c.name, tip: c.keywords.length ? `自定义类别：模型名或分组名里含 ${c.keywords.join("、")}` : "自定义类别（还没设置关键词，只能手动归类）", custom: true })),
-  ...BUILTIN_CATEGORIES.filter((c) => c.id === "other"),
-];
+const allCategories = () => allCategoriesOf(state.customCats);
 const CATEGORY_ORDER_NOW = (): CategoryId[] => allCategories().map((c) => c.id);
 const categoryName = (id: CategoryId): string => allCategories().find((c) => c.id === id)?.name ?? "（已删除的类别）";
-const PLATFORM_CATEGORY: Record<string, CategoryId> = { anthropic: "claude", openai: "openai", gemini: "gemini" };
-
-/** 自动识别分组的类别：站点给的平台 + 模型名。识别不出就是“其他”。 */
-function inferCategories(g: GroupView): CategoryId[] {
-  const found = new Set<CategoryId>();
-  const p = PLATFORM_CATEGORY[g.platform];
-  if (p) found.add(p);
-  for (const m of modelsOf(g)) {
-    const l = m.toLowerCase();
-    for (const [c, re] of CATEGORY_RULES) if (re.test(l)) found.add(c);
-  }
-  // 自定义类别：模型名或分组名里含关键词就归进去
-  const hay = [g.name.toLowerCase(), ...modelsOf(g).map((m) => m.toLowerCase())];
-  for (const c of state.customCats) if (c.keywords.some((k) => k && hay.some((h) => h.includes(k)))) found.add(c.id);
-  return found.size ? CATEGORY_ORDER_NOW().filter((c) => found.has(c)) : ["other"];
-}
-/** 分组的类别：手动设置的优先，否则自动识别。 */
-const categoriesOf = (g: GroupView): CategoryId[] => (g.categories && g.categories.length ? g.categories : inferCategories(g));
-
-const CATEGORY_CLIENTS: Partial<Record<CategoryId, ClientId[]>> = { claude: ["claude", "claude_desktop"], openai: ["codex"], gemini: ["gemini"] };
-/**
- * 这个分组能一键配置到哪些客户端。sub2api 和手动设置过类别的，以后端给的为准；
- * new-api 没有平台分类，后端允许配到任何客户端：模型名认出了 Claude / OpenAI / Gemini 就收窄到对应的客户端，认不出就保持都能配（宁可多给，别让用户没法配）。
- */
-function clientsOf(g: GroupView): ClientId[] {
-  if (!g.clients_inferred) return g.clients;
-  const hit = CLIENT_ORDER.filter((c) => inferCategories(g).some((cat) => CATEGORY_CLIENTS[cat]?.includes(c)));
-  return hit.length ? hit : g.clients;
-}
+/** 分组的类别：手动设置的优先，否则按平台和模型名自动识别（识别规则和菜单栏面板共用，见 categories.ts）。 */
+const categoriesOf = (g: GroupView): CategoryId[] => categoriesOfG(g, modelsOf(g), state.customCats);
+const clientsOf = (g: GroupView): ClientId[] => clientsOfG(g, modelsOf(g), state.customCats);
 const primaryClient = (g: GroupView): ClientId => clientsOf(g)[0] ?? "claude";
 /** 这个分组正在被哪些客户端使用。 */
 const activeOverviews = (g: GroupView) => state.overview.filter((o) => o.in_use && o.active && o.active.site_id === g.site_id && o.active.group_id === g.id);
@@ -1159,7 +1128,10 @@ async function runSpeedTest(list: GroupView[]) {
       try {
         const r = await backend.probeGroup(g.site_id, g.id, null, primaryClient(g));
         state.speeds[k] = { first: r.first_ms, total: r.total_ms, model: r.model, input: r.input_tokens ?? null };
-        if (r.models.length > 0) state.allModels[k] = r.models;
+        if (r.models.length > 0) {
+          state.allModels[k] = r.models;
+          shareModels();
+        }
       } catch (e) {
         const msg = errText(e);
         state.speeds[k] = { error: msg };
@@ -1278,7 +1250,6 @@ function openClientsPicker(anchor: HTMLElement, g: GroupView) {
     box.setAttribute("data-testid", `ec-${c}`);
     box.addEventListener("change", () => (box.checked ? selected.add(c) : selected.delete(c)));
     label.append(box, document.createTextNode(cat.name));
-    label.title = cat.tip;
     m.append(label);
   }
   const hint = document.createElement("div");

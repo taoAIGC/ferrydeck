@@ -865,7 +865,7 @@ async function openPanel({ emitOnList = false, active = false } = {}) {
     const emit = (ev) => (handlers[ev] || []).forEach((id) => window["_" + id]({ event: ev, id: 0, payload: null }));
     window.__emit = emit;
     const site = (id, name) => ({ id, kind: "sub2api", name, base_url: `https://${id}.example.com`, connected: true, account: { display: "me", balance: "$1" }, error: null, needs_login: false });
-    const grp = (site_id, id, name, clients) => ({ site_id, site_name: site_id, id, name, description: null, platform: "x", rate_multiplier: 1, clients, models: [], clients_inferred: false });
+    const grp = (site_id, id, name, clients, models = [], platform = "x") => ({ site_id, site_name: site_id, id, name, description: null, platform, rate_multiplier: 1, clients, models, clients_inferred: false, categories: null });
     window.__TAURI_INTERNALS__ = {
       transformCallback(cb) { const id = nextId++; window["_" + id] = cb; return id; },
       async invoke(cmd, args) {
@@ -877,8 +877,11 @@ async function openPanel({ emitOnList = false, active = false } = {}) {
           window.__listArgs.push(args);
           // 模拟旧版后端的缺陷：每次读取分组都顺手发一个“刷新”事件（面板收到后又来读取，形成循环）
           if (emitOnListFlag) setTimeout(() => emit("panel-shown"), 0);
-          return { groups: [grp("alpha", "1", "Claude 分组", ["claude", "claude_desktop"]), grp("alpha", "2", "GPT 分组", ["codex"])], sites: [site("alpha", "Alpha")], fetched_at: Math.floor(Date.now() / 1000) };
+          return { groups: [grp("alpha", "1", "Claude 分组", ["claude", "claude_desktop"], ["claude-sonnet-5-5"], "anthropic"), grp("alpha", "2", "GPT 分组", ["codex"], ["gpt-5"], "openai"), grp("alpha", "3", "视频分组", [], ["seedance-1-0-pro"])], sites: [site("alpha", "Alpha")], fetched_at: Math.floor(Date.now() / 1000) };
         }
+        if (cmd === "enable_group") { (window.__enableCalls ||= []).push(args); return null; }
+        if (cmd === "get_custom_categories") return [];
+        if (cmd === "cached_models") return {};
         if (cmd === "overview") return ["claude", "claude_desktop", "codex", "gemini"].map((client) => (activeFlag && client === "claude" ? { client, dir_exists: true, in_use: true, active: { site_id: "alpha", site_name: "Alpha", group_id: "1", group_name: "Claude 分组", model: null }, conflicts: [], groups_inferred: false } : { client, dir_exists: true, in_use: false, active: null, conflicts: [], groups_inferred: false }));
         return null;
       },
@@ -893,11 +896,13 @@ async function openPanel({ emitOnList = false, active = false } = {}) {
 
 test("菜单栏面板：切换标签、打开主窗口、退出都有响应", async () => {
   const p = await openPanel();
-  await T(p, "panel-tab-codex").waitFor();
-  assert.equal(await count(p, '[data-testid^="panel-row-"]'), 1, "Claude 标签下只有 Claude 的分组");
-  await T(p, "panel-tab-codex").click();
-  assert.match(await T(p, "panel-tab-codex").getAttribute("class"), /\bon\b/, "点击后标签切换了");
-  assert.equal(await count(p, '[data-testid="panel-row-alpha-2"]'), 1, "显示的是 Codex 的分组");
+  await T(p, "panel-tab-openai").waitFor();
+  assert.deepEqual(await p.locator(".panel-tab").allTextContents(), ["全部", "Claude", "OpenAI", "视频"], "和主窗口一样按模型类别分 tab，只列有分组的");
+  assert.equal(await count(p, '[data-testid^="panel-row-"]'), 3, "“全部”里列出所有分组");
+  await T(p, "panel-tab-openai").click();
+  assert.match(await T(p, "panel-tab-openai").getAttribute("class"), /\bon\b/, "点击后标签切换了");
+  assert.equal(await count(p, '[data-testid="panel-row-alpha-2"]'), 1, "OpenAI 类的分组");
+  assert.equal(await count(p, '[data-testid^="panel-row-"]'), 1);
   await T(p, "panel-open-main").click();
   await T(p, "panel-quit").click();
   const calls = await p.evaluate(() => window.__calls);
@@ -908,13 +913,13 @@ test("菜单栏面板：切换标签、打开主窗口、退出都有响应", as
 
 test("菜单栏面板：即使后端每次读取都发刷新事件，也不会无限循环刷新（否则按钮根本点不中）", async () => {
   const p = await openPanel({ emitOnList: true });
-  await T(p, "panel-tab-codex").waitFor();
+  await T(p, "panel-tab-openai").waitFor();
   await p.waitForTimeout(2600);
   const n = await p.evaluate(() => window.__listCount);
   assert.ok(n <= 4, `2.6 秒内读取了 ${n} 次分组，说明在循环刷新`);
   // 按钮在这段时间里没有被反复换掉：点击能落到
-  await T(p, "panel-tab-gemini").click();
-  assert.match(await T(p, "panel-tab-gemini").getAttribute("class"), /\bon\b/);
+  await T(p, "panel-tab-claude").click();
+  assert.match(await T(p, "panel-tab-claude").getAttribute("class"), /\bon\b/);
   await p.context().close();
 });
 
@@ -1113,8 +1118,8 @@ test("测速结果的提示几乎立即出现（不用等系统 title 的一两�
 test("菜单栏面板：分组的启用图标平时隐藏，鼠标移到那一行才显示，移走就消失；“使用中”一直显示", async () => {
   const p = await openPanel({ active: true });
   await T(p, "panel-tab-claude").waitFor();
-  // 在 Claude 标签下再放一个未启用的分组：用 Codex 标签里的那个未启用分组来验证
-  await T(p, "panel-tab-codex").click();
+  // 用 OpenAI 标签里的那个未启用分组来验证
+  await T(p, "panel-tab-openai").click();
   const power = () => p.evaluate(() => getComputedStyle(document.querySelector('[data-testid="panel-row-alpha-2"] .panel-power')).opacity);
   await p.mouse.move(2, 2);
   await p.waitForFunction(() => getComputedStyle(document.querySelector('[data-testid="panel-row-alpha-2"] .panel-power')).opacity === "0");
@@ -1126,7 +1131,7 @@ test("菜单栏面板：分组的启用图标平时隐藏，鼠标移到那一�
   // 正在使用的分组：文案一直在，没有启用图标
   await T(p, "panel-tab-claude").click();
   assert.equal(await T(p, "panel-row-alpha-1").locator(".badge").isVisible(), true);
-  assert.equal(await T(p, "panel-row-alpha-1").locator(".badge").textContent(), "使用中");
+  assert.match(await T(p, "panel-row-alpha-1").locator(".badge").textContent(), /使用中/);
   assert.equal(await T(p, "panel-row-alpha-1").locator(".panel-power").count(), 0);
   assert.deepEqual(p.errors, []);
   await p.context().close();
@@ -2194,7 +2199,7 @@ test("左侧导航同一时间只有一张卡片处于激活；在中转站管�
 test("检查更新的左边显示当前版本号", async () => {
   const p = await open("sites1");
   await T(p, "app-version").waitFor();
-  assert.equal(await T(p, "app-version").textContent(), "v0.5.4");
+  assert.equal(await T(p, "app-version").textContent(), "v0.5.5");
   const xs = await p.evaluate(() => ["app-version", "check-update"].map((id) => document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect().left));
   assert.ok(xs[0] < xs[1], `版本号在“检查更新”左边: ${xs}`);
   await done(p);
@@ -2517,6 +2522,7 @@ test("类别 tab：按模型名自动识别 DeepSeek / 视频 / 音频等；一�
   await T(p, "group-card-alpha-17").waitFor();
   assert.equal(await T(p, "clients-alpha-17").getAttribute("class").then((c) => /auto/.test(c)), true);
   await T(p, "clients-alpha-17").click();
+  assert.equal(await p.locator('[data-testid="clients-picker"] label[title]').count(), 0, "下拉里的类别没有系统自带的悬停提示（会盖住下面的说明文字）");
   for (const c of ["claude", "openai", "gemini", "deepseek", "cn", "image", "video", "audio", "embed", "other"]) assert.equal(await count(p, `[data-testid="ec-${c}"]`), 1);
   await p.keyboard.press("Escape");
   assert.deepEqual(await opsLog(p), [], "什么都没改就不保存");
@@ -2574,4 +2580,23 @@ test("自定义类别：起名字 + 写模型名关键词，匹配的分组自�
   assert.equal(await count(p, '[data-testid^="cat-c_"]'), 0);
   assert.equal(await count(p, '[data-testid="group-card-alpha-32"]'), 1, "分组没被删");
   await done(p);
+});
+
+test("菜单栏面板：Claude 类分组点一下展开选 Claude Code / Claude Desktop；没有对应客户端的类别显示“不可配置”", async () => {
+  const p = await openPanel();
+  await T(p, "panel-tab-all").waitFor();
+  await T(p, "panel-row-alpha-1").click();
+  await T(p, "panel-pick-alpha-1").waitFor();
+  assert.deepEqual(await T(p, "panel-pick-alpha-1").locator("button").allTextContents(), ["配置到 Claude Code", "配置到 Claude Desktop"]);
+  await T(p, "panel-pick-claude_desktop").click();
+  await p.waitForFunction(() => (window.__enableCalls ?? []).length === 1);
+  assert.deepEqual(await p.evaluate(() => window.__enableCalls[0]), { siteId: "alpha", groupId: "1", client: "claude_desktop", model: null });
+  // OpenAI 类只有 Codex：点一下直接配
+  await T(p, "panel-row-alpha-2").click();
+  await p.waitForFunction(() => (window.__enableCalls ?? []).length === 2);
+  assert.equal(await p.evaluate(() => window.__enableCalls[1].client), "codex");
+  // 视频类：不可配置，行是禁用的
+  assert.equal(await T(p, "panel-row-alpha-3").isDisabled(), true);
+  assert.equal(await T(p, "panel-row-alpha-3").textContent().then((x) => x.includes("不可配置")), true);
+  await p.context().close();
 });

@@ -140,7 +140,7 @@ export function createMockBackend(): Backend {
 
   return {
     async appVersion() {
-      return "0.5.4";
+      return "0.5.5";
     },
     async checkUpdate() {
       await delay();

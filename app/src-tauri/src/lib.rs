@@ -510,6 +510,18 @@ async fn group_models(st: State<'_, AppState>, site_id: String, group_id: String
     service::group_models(&rt.client, &g).await
 }
 
+/// 主窗口把它读到的各分组的模型共享给后端，菜单栏面板据此识别类别（面板不向站点要模型，免得每次打开都请求）。
+#[tauri::command]
+fn share_models(st: State<'_, AppState>, models: std::collections::BTreeMap<String, Vec<String>>) {
+    st.models.lock().unwrap().extend(models.into_iter().filter(|(_, v)| !v.is_empty()));
+}
+
+/// 最近共享的各分组的模型（不发任何网络请求）。
+#[tauri::command]
+fn cached_models(st: State<'_, AppState>) -> std::collections::BTreeMap<String, Vec<String>> {
+    st.models.lock().unwrap().clone()
+}
+
 /// 为每个分组拉取真实可用模型（只用本应用已建好的 Key，不会新建）。返回 {"站点id\u0001分组id": [模型]}。
 #[tauri::command]
 async fn group_models_map(st: State<'_, AppState>) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
@@ -545,6 +557,7 @@ async fn group_models_map(st: State<'_, AppState>) -> Result<std::collections::B
             map.extend(v);
         }
     }
+    st.models.lock().unwrap().extend(map.clone());
     Ok(map)
 }
 
@@ -1222,7 +1235,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![detect_site, add_site, remove_site, load_sites, list_sites, refresh_accounts, list_groups, overview, enable_group, group_models, group_models_map, probe_group, group_usage, admin_overview, admin_replace_upstream, admin_set_account_state, admin_remove_group, set_group_clients, get_custom_categories, save_custom_categories, say_hi, admin_create_downstream, admin_downstreams, admin_links, admin_set_link, admin_create_group, admin_add_upstream, admin_usage, admin_set_paused, admin_remove_upstream, admin_update_group, topup_url, selftest_mode, selftest_env, selftest_tray, selftest_report, data_loss, restore_sites, dismiss_data_loss, panel_close, panel_open_main, panel_note, panel_quit])
+        .invoke_handler(tauri::generate_handler![detect_site, add_site, remove_site, load_sites, list_sites, refresh_accounts, list_groups, overview, enable_group, group_models, group_models_map, share_models, cached_models, probe_group, group_usage, admin_overview, admin_replace_upstream, admin_set_account_state, admin_remove_group, set_group_clients, get_custom_categories, save_custom_categories, say_hi, admin_create_downstream, admin_downstreams, admin_links, admin_set_link, admin_create_group, admin_add_upstream, admin_usage, admin_set_paused, admin_remove_upstream, admin_update_group, topup_url, selftest_mode, selftest_env, selftest_tray, selftest_report, data_loss, restore_sites, dismiss_data_loss, panel_close, panel_open_main, panel_note, panel_quit])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
